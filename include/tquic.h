@@ -1066,6 +1066,23 @@ int quic_conn_ping_path(struct quic_conn_t *conn,
                         socklen_t remote_len);
 
 /**
+ * This sends an IMMEDIATE_ACK frame on all active paths to request an immediate
+ * acknowledgement from the peer. This is useful in scenarios like recovering from
+ * idle or before entering an idle period to get timely feedback.
+ */
+int quic_conn_immediate_ack(struct quic_conn_t *conn);
+
+/**
+ * This sends an IMMEDIATE_ACK frame on the specified path. This function is
+ * mainly useful for multipath QUIC connections.
+ */
+int quic_conn_immediate_ack_path(struct quic_conn_t *conn,
+                                 const struct sockaddr *local,
+                                 socklen_t local_len,
+                                 const struct sockaddr *remote,
+                                 socklen_t remote_len);
+
+/**
  * Add a new path on the client connection.
  */
 int quic_conn_add_path(struct quic_conn_t *conn,
