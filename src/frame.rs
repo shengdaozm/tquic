@@ -161,6 +161,10 @@ pub enum Frame {
     /// confirmation of the handshake to the client.
     HandshakeDone,
 
+    /// IMMEDIATE_ACK frame (type=0x1f) is used to request the peer to
+    /// send an acknowledgement immediately.
+    ImmediateAck,
+
     /// PATH_ABANDON frame informs the peer to abandon a path.
     /// See draft-ietf-quic-multipath-05.
     PathAbandon {
@@ -347,6 +351,8 @@ impl Frame {
 
             0x1e => Frame::HandshakeDone,
 
+            0x1f => Frame::ImmediateAck,
+
             0x15228c05 => Frame::PathAbandon {
                 dcid_seq_num: b.read_varint()?,
                 error_code: b.read_varint()?,
@@ -374,7 +380,7 @@ impl Frame {
             // PADDING and PING are allowed on all packet types.
             (_, Frame::Paddings { .. }) | (_, Frame::Ping { .. }) => true,
 
-            // ACK, CRYPTO, HANDSHAKE_DONE, NEW_TOKEN, PATH_RESPONSE, and
+            // ACK, CRYPTO, HANDSHAKE_DONE, NEW_TOKEN, PATH_RESPONSE, IMMEDIATE_ACK and
             // RETIRE_CONNECTION_ID can't be sent on 0-RTT packets.
             (PacketType::ZeroRTT, Frame::Ack { .. }) => false,
             (PacketType::ZeroRTT, Frame::Crypto { .. }) => false,
@@ -383,12 +389,14 @@ impl Frame {
             (PacketType::ZeroRTT, Frame::PathResponse { .. }) => false,
             (PacketType::ZeroRTT, Frame::RetireConnectionId { .. }) => false,
             (PacketType::ZeroRTT, Frame::ConnectionClose { .. }) => false,
+            (PacketType::ZeroRTT, Frame::ImmediateAck) => false,
 
-            // ACK, CRYPTO and CONNECTION_CLOSE can be sent on all other packet
+            // ACK, CRYPTO, IMMEDIATE_ACK and CONNECTION_CLOSE can be sent on all other packet
             // types.
             (_, Frame::Ack { .. }) => true,
             (_, Frame::Crypto { .. }) => true,
             (_, Frame::ConnectionClose { .. }) => true,
+            (_, Frame::ImmediateAck) => true,
 
             // All frames are allowed on 0-RTT and 1-RTT packets.
             (PacketType::OneRTT, _) => true,
@@ -587,6 +595,10 @@ impl Frame {
                 b.write_varint(0x1e)?;
             }
 
+            Frame::ImmediateAck => {
+                b.write_varint(0x1f)?;
+            }
+
             Frame::PathAbandon {
                 dcid_seq_num,
                 error_code,
@@ -742,6 +754,8 @@ impl Frame {
             }
 
             Frame::HandshakeDone => 1,
+
+            Frame::ImmediateAck => 1,
 
             Frame::PathAbandon {
                 dcid_seq_num,
@@ -922,6 +936,8 @@ impl Frame {
 
             Frame::HandshakeDone => QuicFrame::HandshakeDone,
 
+            Frame::ImmediateAck => QuicFrame::ImmediateAck,
+
             Frame::PathAbandon { .. } => QuicFrame::Unknown {
                 raw_frame_type: 0x15228c05,
                 frame_type_value: None,
@@ -1089,6 +1105,10 @@ impl std::fmt::Debug for Frame {
 
             Frame::HandshakeDone => {
                 write!(f, "HANDSHAKE_DONE")?;
+            }
+
+            Frame::ImmediateAck => {
+                write!(f, "IMMEDIATE_ACK")?;
             }
 
             Frame::PathAbandon {
@@ -1789,6 +1809,23 @@ mod tests {
         assert!(Frame::from_bytes(&mut buf, PacketType::ZeroRTT).is_err());
         assert!(Frame::from_bytes(&mut buf, PacketType::Initial).is_err());
         assert!(Frame::from_bytes(&mut buf, PacketType::Handshake).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn immediate_ack() -> Result<()> {
+        let frame = Frame::ImmediateAck;
+        assert_eq!(format!("{:?}", &frame), "IMMEDIATE_ACK");
+
+        let mut buf = [0; 128];
+        let len = frame.to_bytes(&mut buf[..])?;
+        assert_eq!(len, frame.wire_len());
+        assert_eq!(len, 1);
+        assert_eq!(&buf[..len], [0x1f]);
+
+        let mut buf = Bytes::copy_from_slice(&buf);
+        assert_eq!((frame, 1), Frame::from_bytes(&mut buf, PacketType::OneRTT)?);
+        assert!(Frame::from_bytes(&mut buf, PacketType::ZeroRTT).is_err());
         Ok(())
     }
 
