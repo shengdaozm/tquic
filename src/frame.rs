@@ -165,6 +165,12 @@ pub enum Frame {
     /// send an acknowledgement immediately.
     ImmediateAck,
 
+    /// ACK_FREQUENCY frame (type=0xaf) is used to inform the peer of the
+    /// desired frequency of acknowledgements.
+    AckFrequency {
+        frame: AckFrequencyFrame,
+    },
+
     /// PATH_ABANDON frame informs the peer to abandon a path.
     /// See draft-ietf-quic-multipath-05.
     PathAbandon {
@@ -182,6 +188,25 @@ pub enum Frame {
         seq_num: u64,
         status: u64,
     },
+}
+
+/// ACK_FREQUENCY frame (type=0xaf) is used to inform the peer of the
+/// desired frequency of acknowledgements.
+///
+/// The ACK_FREQUENCY frame is a new frame type defined in
+/// draft-ietf-quic-ack-frequency-11.
+#[derive(Clone, PartialEq, Eq)]
+pub struct AckFrequencyFrame {
+    /// The sequence number of the ACK_FREQUENCY frame.
+    pub sequence_number: u64,
+    /// The number of ack-eliciting packets that the receiver is willing to
+    /// receive before sending an acknowledgement.
+    pub ack_eliciting_threshold: u64,
+    /// The maximum delay in microseconds that the receiver is willing to
+    /// wait before sending an acknowledgement.
+    pub update_max_ack_delay: u64,
+    /// The value of the `Ignored` field is not used.
+    pub ignored: u64,
 }
 
 impl Frame {
@@ -353,6 +378,21 @@ impl Frame {
 
             0x1f => Frame::ImmediateAck,
 
+            0xaf => {
+                let sequence_number = b.read_varint()?;
+                let ack_eliciting_threshold = b.read_varint()?;
+                let update_max_ack_delay = b.read_varint()?;
+                let ignored = b.read_varint()?;
+                Frame::AckFrequency {
+                    frame: AckFrequencyFrame {
+                        sequence_number,
+                        ack_eliciting_threshold,
+                        update_max_ack_delay,
+                        ignored,
+                    },
+                }
+            }
+
             0x15228c05 => Frame::PathAbandon {
                 dcid_seq_num: b.read_varint()?,
                 error_code: b.read_varint()?,
@@ -401,6 +441,7 @@ impl Frame {
             // All frames are allowed on 0-RTT and 1-RTT packets.
             (PacketType::OneRTT, _) => true,
             (PacketType::ZeroRTT, _) => true,
+            (_, Frame::AckFrequency { .. }) => true,
 
             // All other cases are forbidden.
             (..) => false,
@@ -599,6 +640,21 @@ impl Frame {
                 b.write_varint(0x1f)?;
             }
 
+            Frame::AckFrequency {
+                frame: AckFrequencyFrame {
+                    sequence_number,
+                    ack_eliciting_threshold,
+                    update_max_ack_delay,
+                    ignored,
+                },
+            } => {
+                b.write_varint(0xaf)?;
+                b.write_varint(*sequence_number)?;
+                b.write_varint(*ack_eliciting_threshold)?;
+                b.write_varint(*update_max_ack_delay)?;
+                b.write_varint(*ignored)?;
+            }
+
             Frame::PathAbandon {
                 dcid_seq_num,
                 error_code,
@@ -756,6 +812,21 @@ impl Frame {
             Frame::HandshakeDone => 1,
 
             Frame::ImmediateAck => 1,
+
+            Frame::AckFrequency {
+                frame: AckFrequencyFrame {
+                    sequence_number,
+                    ack_eliciting_threshold,
+                    update_max_ack_delay,
+                    ignored,
+                },
+            } => {
+                codec::encode_varint_len(0xaf)
+                    + codec::encode_varint_len(*sequence_number)
+                    + codec::encode_varint_len(*ack_eliciting_threshold)
+                    + codec::encode_varint_len(*update_max_ack_delay)
+                    + codec::encode_varint_len(*ignored)
+            }
 
             Frame::PathAbandon {
                 dcid_seq_num,
@@ -938,6 +1009,12 @@ impl Frame {
 
             Frame::ImmediateAck => QuicFrame::ImmediateAck,
 
+            Frame::AckFrequency { .. } => QuicFrame::Unknown {
+                raw_frame_type: 0xaf,
+                frame_type_value: None,
+                raw: None,
+            },
+
             Frame::PathAbandon { .. } => QuicFrame::Unknown {
                 raw_frame_type: 0x15228c05,
                 frame_type_value: None,
@@ -961,6 +1038,7 @@ impl Frame {
                 | Frame::Ack { .. }
                 | Frame::ApplicationClose { .. }
                 | Frame::ConnectionClose { .. }
+                | Frame::AckFrequency { .. }
         )
     }
 
@@ -1109,6 +1187,24 @@ impl std::fmt::Debug for Frame {
 
             Frame::ImmediateAck => {
                 write!(f, "IMMEDIATE_ACK")?;
+            }
+
+            Frame::AckFrequency {
+                frame: AckFrequencyFrame {
+                    sequence_number,
+                    ack_eliciting_threshold,
+                    update_max_ack_delay,
+                    ignored,
+                },
+            } => {
+                write!(
+                    f,
+                    "ACK_FREQUENCY seq={} threshold={} delay={} ignored={}",
+                    sequence_number,
+                    ack_eliciting_threshold,
+                    update_max_ack_delay,
+                    ignored,
+                )?;
             }
 
             Frame::PathAbandon {
@@ -1826,6 +1922,59 @@ mod tests {
         let mut buf = Bytes::copy_from_slice(&buf);
         assert_eq!((frame, 1), Frame::from_bytes(&mut buf, PacketType::OneRTT)?);
         assert!(Frame::from_bytes(&mut buf, PacketType::ZeroRTT).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn ack_frequency() -> Result<()> {
+        let frame = Frame::AckFrequency {
+            frame: AckFrequencyFrame {
+                sequence_number: 1,
+                ack_eliciting_threshold: 2,
+                update_max_ack_delay: 3,
+                ignored: 0,
+            },
+        };
+        assert_eq!(
+            format!("{:?}", &frame),
+            "ACK_FREQUENCY seq=1 threshold=2 delay=3 ignored=0"
+        );
+
+        let mut buf = [0; 128];
+        let len = frame.to_bytes(&mut buf[..])?;
+        assert_eq!(len, frame.wire_len());
+        assert_eq!(len, 6); // 2 (type) + 1 (seq) + 1 (threshold) + 1 (delay) + 1 (ignored)
+
+        let mut buf = Bytes::copy_from_slice(&buf);
+        assert_eq!(
+            (frame, 6),
+            Frame::from_bytes(&mut buf, PacketType::OneRTT)?
+        );
+
+        // Test with larger values to check varint encoding
+        let frame_large = Frame::AckFrequency {
+            frame: AckFrequencyFrame {
+                sequence_number: 1234567890,
+                ack_eliciting_threshold: 9876543210,
+                update_max_ack_delay: 1000000000000,
+                ignored: 123,
+            },
+        };
+        assert_eq!(
+            format!("{:?}", &frame_large),
+            "ACK_FREQUENCY seq=1234567890 threshold=9876543210 delay=1000000000000 ignored=123"
+        );
+
+        let mut buf_large = [0; 128];
+        let len_large = frame_large.to_bytes(&mut buf_large[..])?;
+        assert_eq!(len_large, frame_large.wire_len());
+
+        let mut buf_large_read = Bytes::copy_from_slice(&buf_large);
+        assert_eq!(
+            (frame_large, len_large),
+            Frame::from_bytes(&mut buf_large_read, PacketType::OneRTT)?
+        );
+
         Ok(())
     }
 

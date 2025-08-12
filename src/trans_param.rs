@@ -116,6 +116,11 @@ pub struct TransportParams {
     /// See draft-ietf-quic-multipath-05.
     pub enable_multipath: bool,
 
+    /// The parameter is an integer value indicating the minimum amount of time
+    /// in microseconds by which the endpoint will delay sending acknowledgments.
+    /// See draft-ietf-quic-ack-frequency-11.
+    pub min_ack_delay: u64,
+
     /// The parameter is used to negotiate the disablement of encryption on 1-RTT
     /// packets. It is only meant to be used in environments where both endpoints
     /// completely trust the path between themselves.
@@ -266,6 +271,10 @@ impl TransportParams {
                     tp.disable_encryption = true;
                 }
 
+                0xde1a => {
+                    tp.min_ack_delay = val.read_varint()?;
+                }
+
                 // Ignore unknown parameters.
                 _ => (),
             }
@@ -404,6 +413,12 @@ impl TransportParams {
             buf.write_varint(0)?;
         }
 
+        if tp.min_ack_delay != 0 {
+            buf.write_varint(0xde1a)?;
+            buf.write_varint(codec::encode_varint_len(tp.min_ack_delay) as u64)?;
+            buf.write_varint(tp.min_ack_delay)?;
+        }
+
         Ok(len - buf.len())
     }
 
@@ -482,6 +497,7 @@ impl Default for TransportParams {
             retry_source_connection_id: None,
 
             enable_multipath: false,
+            min_ack_delay: 0,
             disable_encryption: false,
         }
     }
@@ -582,6 +598,7 @@ mod tests {
             initial_source_connection_id: Some(ConnectionId::random()),
             retry_source_connection_id: None,
             enable_multipath: true,
+            min_ack_delay: 100,
             disable_encryption: false,
         };
 
@@ -626,6 +643,7 @@ mod tests {
             initial_source_connection_id: Some(ConnectionId::random()),
             retry_source_connection_id: Some(ConnectionId::random()),
             enable_multipath: false,
+            min_ack_delay: 200,
             disable_encryption: true,
         };
 
