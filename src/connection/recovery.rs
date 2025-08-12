@@ -60,6 +60,19 @@ pub struct Recovery {
     /// It is used for PTO calculation.
     pub max_ack_delay: Duration,
 
+    /// The minimum amount of time in microseconds by which the endpoint will
+    /// delay sending acknowledgments.
+    /// See draft-ietf-quic-ack-frequency-11.
+    pub peer_min_ack_delay: Duration,
+
+    /// The number of ack-eliciting packets that the receiver is willing to
+    /// receive before sending an acknowledgement.
+    /// See draft-ietf-quic-ack-frequency-11.
+    pub peer_ack_eliciting_threshold: u64,
+
+    /// The sequence number of the last ACK_FREQUENCY frame received from the peer.
+    pub peer_ack_frequency_sequence_number: u64,
+
     /// The validated maximum size of outgoing UDP payloads in bytes.
     pub max_datagram_size: usize,
 
@@ -127,6 +140,9 @@ impl Recovery {
     pub(super) fn new(conf: &RecoveryConfig) -> Self {
         Recovery {
             max_ack_delay: conf.max_ack_delay,
+            peer_min_ack_delay: Duration::from_micros(0),
+            peer_ack_eliciting_threshold: 1,
+            peer_ack_frequency_sequence_number: 0,
             max_datagram_size: crate::DEFAULT_SEND_UDP_PAYLOAD_SIZE,
             pto_linear_factor: conf.pto_linear_factor,
             max_pto: conf.max_pto,
@@ -265,6 +281,14 @@ impl Recovery {
         let rtt_sample = self.detect_acked_packets(ranges, space, &mut newly_acked_pkts, now);
         if newly_acked_pkts.is_empty() {
             return Ok((0, 0));
+        }
+
+        // Check if we need to send an ACK based on peer_ack_eliciting_threshold and peer_min_ack_delay
+        if space.ack_eliciting_pkts_since_last_sent_ack >= self.peer_ack_eliciting_threshold {
+            space.need_send_ack = true;
+            space.ack_timer = None;
+        } else if space.ack_timer.is_none() {
+            space.ack_timer = Some(now + self.peer_min_ack_delay);
         }
 
         // Update RTT estimation
