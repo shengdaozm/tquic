@@ -118,8 +118,9 @@ pub struct TransportParams {
 
     /// The parameter is an integer value indicating the minimum amount of time
     /// in microseconds by which the endpoint will delay sending acknowledgments.
+    /// This parameter is not None if the endpoint supports the ACK frequency extension.
     /// See draft-ietf-quic-ack-frequency-11.
-    pub min_ack_delay: u64,
+    pub min_ack_delay: Option<u64>,
 
     /// The parameter is used to negotiate the disablement of encryption on 1-RTT
     /// packets. It is only meant to be used in environments where both endpoints
@@ -271,8 +272,14 @@ impl TransportParams {
                     tp.disable_encryption = true;
                 }
 
-                0xde1a => {
-                    tp.min_ack_delay = val.read_varint()?;
+                0xff04de1b => {
+                    tp.min_ack_delay = Some(val.read_varint()?);
+                    // Validate min_ack_delay (microseconds) <= max_ack_delay (milliseconds)
+                    if let Some(min_ack_delay) = tp.min_ack_delay {
+                        if min_ack_delay > tp.max_ack_delay * 1000 {
+                            return Err(Error::TransportParameterError);
+                        }
+                    }
                 }
 
                 // Ignore unknown parameters.
@@ -413,10 +420,10 @@ impl TransportParams {
             buf.write_varint(0)?;
         }
 
-        if tp.min_ack_delay != 0 {
-            buf.write_varint(0xde1a)?;
-            buf.write_varint(codec::encode_varint_len(tp.min_ack_delay) as u64)?;
-            buf.write_varint(tp.min_ack_delay)?;
+        if let Some(min_ack_delay) = tp.min_ack_delay {
+            buf.write_varint(0xff04de1b)?;
+            buf.write_varint(codec::encode_varint_len(min_ack_delay) as u64)?;
+            buf.write_varint(min_ack_delay)?;
         }
 
         Ok(len - buf.len())
@@ -497,7 +504,7 @@ impl Default for TransportParams {
             retry_source_connection_id: None,
 
             enable_multipath: false,
-            min_ack_delay: 0,
+            min_ack_delay: None,
             disable_encryption: false,
         }
     }
@@ -598,7 +605,7 @@ mod tests {
             initial_source_connection_id: Some(ConnectionId::random()),
             retry_source_connection_id: None,
             enable_multipath: true,
-            min_ack_delay: 100,
+            min_ack_delay: Some(100),
             disable_encryption: false,
         };
 
@@ -643,7 +650,7 @@ mod tests {
             initial_source_connection_id: Some(ConnectionId::random()),
             retry_source_connection_id: Some(ConnectionId::random()),
             enable_multipath: false,
-            min_ack_delay: 200,
+            min_ack_delay: Some(200),
             disable_encryption: true,
         };
 

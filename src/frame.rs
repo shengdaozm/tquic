@@ -199,14 +199,19 @@ pub enum Frame {
 pub struct AckFrequencyFrame {
     /// The sequence number of the ACK_FREQUENCY frame.
     pub sequence_number: u64,
+
     /// The number of ack-eliciting packets that the receiver is willing to
     /// receive before sending an acknowledgement.
     pub ack_eliciting_threshold: u64,
+
     /// The maximum delay in microseconds that the receiver is willing to
     /// wait before sending an acknowledgement.
-    pub update_max_ack_delay: u64,
-    /// The value of the `Ignored` field is not used.
-    pub ignored: u64,
+    pub requested_max_ack_delay: u64,
+
+    /// The maximum number of reordered packets that the receiver is willing to
+    /// wait before sending an acknowledgement.
+    /// TODO: implement this field
+    pub reordering_threshold: u64,
 }
 
 impl Frame {
@@ -381,14 +386,14 @@ impl Frame {
             0xaf => {
                 let sequence_number = b.read_varint()?;
                 let ack_eliciting_threshold = b.read_varint()?;
-                let update_max_ack_delay = b.read_varint()?;
-                let ignored = b.read_varint()?;
+                let requested_max_ack_delay = b.read_varint()?;
+                let reordering_threshold = b.read_varint()?;
                 Frame::AckFrequency {
                     frame: AckFrequencyFrame {
                         sequence_number,
                         ack_eliciting_threshold,
-                        update_max_ack_delay,
-                        ignored,
+                        requested_max_ack_delay,
+                        reordering_threshold,
                     },
                 }
             }
@@ -644,15 +649,15 @@ impl Frame {
                 frame: AckFrequencyFrame {
                     sequence_number,
                     ack_eliciting_threshold,
-                    update_max_ack_delay,
-                    ignored,
+                    requested_max_ack_delay,
+                    reordering_threshold,
                 },
             } => {
                 b.write_varint(0xaf)?;
                 b.write_varint(*sequence_number)?;
                 b.write_varint(*ack_eliciting_threshold)?;
-                b.write_varint(*update_max_ack_delay)?;
-                b.write_varint(*ignored)?;
+                b.write_varint(*requested_max_ack_delay)?;
+                b.write_varint(*reordering_threshold)?;
             }
 
             Frame::PathAbandon {
@@ -817,15 +822,15 @@ impl Frame {
                 frame: AckFrequencyFrame {
                     sequence_number,
                     ack_eliciting_threshold,
-                    update_max_ack_delay,
-                    ignored,
+                    requested_max_ack_delay,
+                    reordering_threshold,
                 },
             } => {
                 codec::encode_varint_len(0xaf)
                     + codec::encode_varint_len(*sequence_number)
                     + codec::encode_varint_len(*ack_eliciting_threshold)
-                    + codec::encode_varint_len(*update_max_ack_delay)
-                    + codec::encode_varint_len(*ignored)
+                    + codec::encode_varint_len(*requested_max_ack_delay)
+                    + codec::encode_varint_len(*reordering_threshold)
             }
 
             Frame::PathAbandon {
@@ -1193,17 +1198,17 @@ impl std::fmt::Debug for Frame {
                 frame: AckFrequencyFrame {
                     sequence_number,
                     ack_eliciting_threshold,
-                    update_max_ack_delay,
-                    ignored,
-                },
+                    requested_max_ack_delay,
+                    reordering_threshold,
+                }
             } => {
                 write!(
                     f,
-                    "ACK_FREQUENCY seq={} threshold={} delay={} ignored={}",
+                    "ACK_FREQUENCY seq={} threshold={} delay={} reorder={}",
                     sequence_number,
                     ack_eliciting_threshold,
-                    update_max_ack_delay,
-                    ignored,
+                    requested_max_ack_delay,
+                    reordering_threshold,
                 )?;
             }
 
@@ -1931,8 +1936,8 @@ mod tests {
             frame: AckFrequencyFrame {
                 sequence_number: 1,
                 ack_eliciting_threshold: 2,
-                update_max_ack_delay: 3,
-                ignored: 0,
+                requested_max_ack_delay: 3,
+                reordering_threshold: 0,
             },
         };
         assert_eq!(
@@ -1956,8 +1961,8 @@ mod tests {
             frame: AckFrequencyFrame {
                 sequence_number: 1234567890,
                 ack_eliciting_threshold: 9876543210,
-                update_max_ack_delay: 1000000000000,
-                ignored: 123,
+                requested_max_ack_delay: 1000000000000,
+                reordering_threshold: 123,
             },
         };
         assert_eq!(

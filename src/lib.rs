@@ -760,6 +760,11 @@ impl Config {
         self.tls_config_selector = Some(tls_config_selector);
     }
 
+    /// Set ack_min_delay to enable ACK_FREQUENCY frame and IMMEDIATE_ACK frame
+    pub fn set_ack_min_delay(&mut self, ack_min_delay: Option<u64>) {
+        self.local_transport_params.min_ack_delay = ack_min_delay;
+    }
+
     /// Generate random address token key.
     fn rand_address_token_key() -> Result<Vec<LessSafeKey>> {
         let mut key = [0_u8; 16];

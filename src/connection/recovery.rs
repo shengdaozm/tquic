@@ -73,6 +73,11 @@ pub struct Recovery {
     /// The sequence number of the last ACK_FREQUENCY frame received from the peer.
     pub peer_ack_frequency_sequence_number: u64,
 
+    /// The maximum number of reordered packets that the receiver is willing to
+    /// wait before sending an acknowledgement.
+    /// See draft-ietf-quic-ack-frequency-11.
+    pub peer_reordering_threshold: u64,
+
     /// The validated maximum size of outgoing UDP payloads in bytes.
     pub max_datagram_size: usize,
 
@@ -143,6 +148,7 @@ impl Recovery {
             peer_min_ack_delay: Duration::from_micros(0),
             peer_ack_eliciting_threshold: 1,
             peer_ack_frequency_sequence_number: 0,
+            peer_reordering_threshold: 0,
             max_datagram_size: crate::DEFAULT_SEND_UDP_PAYLOAD_SIZE,
             pto_linear_factor: conf.pto_linear_factor,
             max_pto: conf.max_pto,

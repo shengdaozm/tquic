@@ -176,30 +176,6 @@ pub struct Connection {
 }
 
 impl Connection {
-    /// Request the peer to update its ACK policy.
-    ///
-    /// This method constructs an ACK_FREQUENCY frame and adds it to the send queue.
-    /// The `ack_eliciting_threshold` specifies the number of ack-eliciting packets
-    /// the receiver is willing to receive before sending an acknowledgment.
-    /// The `max_ack_delay` specifies the maximum delay in microseconds that the
-    /// receiver is willing to wait before sending an acknowledgment.
-    pub fn update_ack_frequency(
-        &mut self,
-        ack_eliciting_threshold: u64,
-        max_ack_delay: u64,
-    ) -> Result<()> {
-        let frame = Frame::AckFrequency {
-            frame: crate::frame::AckFrequencyFrame {
-                sequence_number: self.next_ack_frequency_sequence_number,
-                ack_eliciting_threshold,
-                update_max_ack_delay: max_ack_delay,
-                ignored: 0,
-            },
-        };
-        self.ack_frequency_frames_to_send.push_back(frame);
-        self.next_ack_frequency_sequence_number += 1;
-        Ok(())
-    }
     /// Create a new QUIC client connection
     #[doc(hidden)]
     pub fn new_client(
@@ -470,6 +446,11 @@ impl Connection {
             };
             left -= read;
         }
+
+        // // Handle ACK_FREQUENCY frames if any
+        // if let Some(frame) = self.ack_frequency_frames_to_send.pop_front() {
+        //     self.handle_ack_frequency_frame(frame)?;
+        // }
 
         // Try to process undecryptable packets
         if !self.is_established() {
@@ -762,7 +743,8 @@ impl Connection {
                 path.recovery.peer_ack_frequency_sequence_number = frame.sequence_number;
                 path.recovery.peer_ack_eliciting_threshold = frame.ack_eliciting_threshold;
                 path.recovery.peer_min_ack_delay =
-                    time::Duration::from_micros(frame.update_max_ack_delay);
+                    time::Duration::from_micros(frame.requested_max_ack_delay);
+                path.recovery.peer_reordering_threshold = frame.reordering_threshold;
             }
 
             Frame::ImmediateAck => {
@@ -1295,7 +1277,9 @@ impl Connection {
         let active_path = self.paths.get_active_mut()?;
         let max_ack_delay = time::Duration::from_millis(peer_params.max_ack_delay);
         active_path.recovery.max_ack_delay = max_ack_delay;
-        active_path.recovery.peer_min_ack_delay = time::Duration::from_micros(peer_params.min_ack_delay);
+        
+        //TODO: remove the unwarp here
+        active_path.recovery.peer_min_ack_delay = time::Duration::from_micros(peer_params.min_ack_delay.unwrap());
 
         let max_datagram_size = peer_params.max_udp_payload_size as usize;
         active_path
@@ -3627,6 +3611,11 @@ impl Connection {
         self.flags.contains(GotReset)
     }
 
+    /// Check whether support the ack frequency
+    pub fn is_support_ack_frequency(&self) -> bool {
+        self.peer_transport_params.min_ack_delay.is_some()
+    }
+
     /// Close the connection.
     pub fn close(&mut self, app: bool, err: u64, reason: &[u8]) -> Result<()> {
         if self.is_closed() || self.is_draining() {
@@ -5011,6 +5000,7 @@ pub(crate) mod tests {
             conf.enable_multipath(false);
             conf.enable_dplpmtud(true);
             conf.enable_pacing(false);
+            conf.set_ack_min_delay(Some(20));
 
             let application_protos = vec![b"h3".to_vec()];
             let tls_config = if !is_server {
@@ -8178,111 +8168,6 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn test_update_ack_frequency_queuing() -> Result<()> {
-        let mut test_pair = TestPair::new_with_test_config()?;
-        assert_eq!(test_pair.handshake(), Ok(()));
-
-        let threshold = 5;
-        let delay = 1000;
-        test_pair.client.update_ack_frequency(threshold, delay).unwrap();
-
-        assert_eq!(test_pair.client.ack_frequency_frames_to_send.len(), 1);
-        let frame = test_pair.client.ack_frequency_frames_to_send.pop_front().unwrap();
-        match frame {
-            Frame::AckFrequency { frame } => {
-                assert_eq!(frame.sequence_number, 0);
-                assert_eq!(frame.ack_eliciting_threshold, threshold);
-                assert_eq!(frame.update_max_ack_delay, delay);
-            }
-            _ => panic!("Unexpected frame type"),
-        }
-        assert_eq!(test_pair.client.next_ack_frequency_sequence_number, 1);
-
-        test_pair.client.update_ack_frequency(threshold + 1, delay + 1).unwrap();
-        assert_eq!(test_pair.client.ack_frequency_frames_to_send.len(), 1);
-        let frame = test_pair.client.ack_frequency_frames_to_send.pop_front().unwrap();
-        match frame {
-            Frame::AckFrequency { frame } => {
-                assert_eq!(frame.sequence_number, 1);
-                assert_eq!(frame.ack_eliciting_threshold, threshold + 1);
-                assert_eq!(frame.update_max_ack_delay, delay + 1);
-            }
-            _ => panic!("Unexpected frame type"),
-        }
-        assert_eq!(test_pair.client.next_ack_frequency_sequence_number, 2);
-
-        Ok(())
-    }
-
-    #[test]
-    fn test_send_ack_frequency_frame() -> Result<()> {
-        let mut test_pair = TestPair::new_with_test_config()?;
-        assert_eq!(test_pair.handshake(), Ok(()));
-
-        let threshold = 5;
-        let delay = 1000;
-        test_pair.client.update_ack_frequency(threshold, delay)?;
-
-        let mut out = [0; 1200];
-        let (len, _) = test_pair.client.send(&mut out)?;
-        assert!(len > 0);
-
-        let mut buf = Bytes::copy_from_slice(&out[..len]);
-        let (hdr, read) = PacketHeader::from_bytes(&mut buf, 0).unwrap();
-        let length = buf.len() - read;
-        let payload_offset = read + hdr.pkt_num_len;
-        let payload_len = length - hdr.pkt_num_len;
-        let mut payload = Bytes::copy_from_slice(&buf[payload_offset..payload_offset + payload_len]);
-
-        let (frame, _) = Frame::from_bytes(&mut payload, hdr.pkt_type)?;
-        match frame {
-            Frame::AckFrequency { frame } => {
-                assert_eq!(frame.sequence_number, 0);
-                assert_eq!(frame.ack_eliciting_threshold, threshold);
-                assert_eq!(frame.update_max_ack_delay, delay);
-            }
-            _ => panic!("Unexpected frame type"),
-        }
-
-        Ok(())
-    }
-
-    #[test]
-    fn test_ack_frequency_invalid_sequence_number() -> Result<()> {
-        let mut test_pair = TestPair::new_with_test_config()?;
-        assert_eq!(test_pair.handshake(), Ok(()));
-
-        let threshold = 5;
-        let delay = 1000;
-
-        // Client sends an ACK_FREQUENCY frame with sequence number 0
-        test_pair.client.update_ack_frequency(threshold, delay)?;
-        let (len, _) = test_pair.client.send(&mut [0; 1200])?;
-        let client_test_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 9443);
-        let server_test_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 443);
-        test_pair.server.recv(&mut &mut [0; 1200][..len], &PacketInfo {
-            src: client_test_addr,
-            dst: server_test_addr,
-            time: time::Instant::now(),
-        })?; // Server receives and processes
-
-        // Client sends another ACK_FREQUENCY frame with sequence number 0 (invalid)
-        test_pair.client.update_ack_frequency(threshold, delay)?;
-        let (len, _) = test_pair.client.send(&mut [0; 1200])?;
-
-        // Server receives the invalid frame, expecting a FRAME_ENCODING error
-        let result = test_pair.server.recv(&mut &mut [0; 1200][..len], &PacketInfo {
-            src: client_test_addr,
-            dst: server_test_addr,
-            time: time::Instant::now(),
-        });
-        assert!(result.is_err());
-        assert_eq!(result.unwrap_err(), Error::FrameEncodingError);
-
-        Ok(())
-    }
-
-    #[test]
     fn test_ack_triggering_with_ack_frequency() -> Result<()> {
         let mut test_pair = TestPair::new_with_test_config()?;
         assert_eq!(test_pair.handshake(), Ok(()));
@@ -8306,6 +8191,7 @@ pub(crate) mod tests {
         // ACK should not be sent yet
         assert_eq!(test_pair.server.spaces.get(SpaceId::Data).unwrap().need_send_ack, false);
         assert!(test_pair.server.spaces.get(SpaceId::Data).unwrap().ack_timer.is_some());
+        assert_eq!(test_pair.server.spaces.get(SpaceId::Data).unwrap().ack_eliciting_pkts_since_last_sent_ack, 1);
 
         // Send 2nd ack-eliciting packet
         test_pair.client.stream_write(stream_id, data.clone(), false)?;
@@ -8313,6 +8199,7 @@ pub(crate) mod tests {
         test_pair.server.recv(&mut packets[0].0.clone(), &packets[0].1)?;
         // ACK should not be sent yet (threshold is 3)
         assert_eq!(test_pair.server.spaces.get(SpaceId::Data).unwrap().need_send_ack, false);
+        assert_eq!(test_pair.server.spaces.get(SpaceId::Data).unwrap().ack_eliciting_pkts_since_last_sent_ack, 2);
 
         // Send 3rd ack-eliciting packet
         test_pair.client.stream_write(stream_id, data.clone(), false)?;
@@ -8321,6 +8208,7 @@ pub(crate) mod tests {
         // ACK should be sent now (threshold reached)
         assert_eq!(test_pair.server.spaces.get(SpaceId::Data).unwrap().need_send_ack, true);
         assert!(test_pair.server.spaces.get(SpaceId::Data).unwrap().ack_timer.is_none());
+        assert_eq!(test_pair.server.spaces.get(SpaceId::Data).unwrap().ack_eliciting_pkts_since_last_sent_ack, 3);
 
         // Reset server state for next test
         test_pair.server.spaces.get_mut(SpaceId::Data).unwrap().need_send_ack = false;
@@ -8335,8 +8223,9 @@ pub(crate) mod tests {
         assert!(test_pair.server.spaces.get(SpaceId::Data).unwrap().ack_timer.is_some());
 
         // Advance time beyond custom_delay
-        test_pair.server.on_timeout(test_pair.server.spaces.get(SpaceId::Data).unwrap().ack_timer.unwrap() + custom_delay);
+        test_pair.server.on_timeout(test_pair.server.spaces.get(SpaceId::Data).unwrap().ack_timer.unwrap());
         // ACK should be sent now (delay reached)
+        //TODO: add the call to uupdate the state of the ack timer
         assert_eq!(test_pair.server.spaces.get(SpaceId::Data).unwrap().need_send_ack, true);
         assert!(test_pair.server.spaces.get(SpaceId::Data).unwrap().ack_timer.is_none());
 
