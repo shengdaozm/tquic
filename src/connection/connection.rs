@@ -2826,6 +2826,36 @@ impl Connection {
         Ok(())
     }
 
+    /// make a ack_frequency frame and push it to the ack_frequency_frames_to_send queue
+    pub fn update_ack_frequency(
+        &mut self,
+        ack_eliciting_threshold: u64,
+        requested_max_ack_delay: u64,
+        reordering_threshold: u64,
+    ) -> Result<()> {
+        if !self.is_established() || !self.is_support_ack_frequency() {
+            return Err(Error::InvalidOperation("ACK Frequency extension not supported or handshake not completed".into()));
+        }
+
+        let frame = frame::Frame::AckFrequency {
+            frame: frame::AckFrequencyFrame {
+                sequence_number: self.next_ack_frequency_sequence_number,
+                ack_eliciting_threshold,
+                requested_max_ack_delay,
+                reordering_threshold,
+            },
+        };
+
+        self.ack_frequency_frames_to_send.push_back(frame);
+
+        self.next_ack_frequency_sequence_number += 1;
+
+        // ensure this frame can be sent in the next packet
+        self.mark_tickable(true);
+
+        Ok(())
+    }
+
     fn write_buffered_stream_frame_to_packet(
         stream_id: u64,
         offset: u64,
@@ -3442,6 +3472,7 @@ impl Connection {
                                 if space.ack_eliciting_pkts_since_last_sent_ack > 0 {
                                     space.need_send_ack = true;
                                 }
+                                debug!("ack frequency support and ack_eliciting_pkts_since_last_sent_ack is {}",space.ack_eliciting_pkts_since_last_sent_ack);
                             } else {
                                 space.need_send_ack = true;
                             }
@@ -4722,6 +4753,7 @@ pub(crate) mod tests {
     use crate::ConnectionIdGenerator;
     use crate::RandomConnectionIdGenerator;
     use bytes::BytesMut;
+    use libc::printf;
     use rand::prelude::SliceRandom;
     use rand::thread_rng;
     use rand::RngCore;
@@ -4779,6 +4811,14 @@ pub(crate) mod tests {
             let mut client_config = TestPair::new_test_config(false)?;
             client_config.cid_len = crate::MAX_CID_LEN;
             let mut server_config = TestPair::new_test_config(true)?;
+            server_config.cid_len = crate::MAX_CID_LEN;
+            TestPair::new(&mut client_config, &mut server_config)
+        }
+
+        pub fn new_with_test_config_with_ack_frequency() -> Result<TestPair> {
+            let mut client_config = TestPair::new_test_config_with_ack_frequency(false)?;
+            client_config.cid_len = crate::MAX_CID_LEN;
+            let mut server_config = TestPair::new_test_config_with_ack_frequency(true)?;
             server_config.cid_len = crate::MAX_CID_LEN;
             TestPair::new(&mut client_config, &mut server_config)
         }
@@ -4982,6 +5022,50 @@ pub(crate) mod tests {
 
         /// Create default test config
         pub fn new_test_config(is_server: bool) -> Result<Config> {
+            let mut conf = Config::new()?;
+            conf.set_initial_max_data(90);
+            conf.set_initial_max_stream_data_bidi_local(50);
+            conf.set_initial_max_stream_data_bidi_remote(40);
+            conf.set_initial_max_stream_data_uni(30);
+            conf.set_initial_max_streams_bidi(3);
+            conf.set_initial_max_streams_uni(2);
+            conf.set_recv_udp_payload_size(6000);
+            conf.set_max_connection_window(1024 * 1024);
+            conf.set_max_stream_window(1024 * 1024);
+            conf.set_max_concurrent_conns(10);
+            conf.set_active_connection_id_limit(2);
+            conf.set_ack_delay_exponent(3);
+            conf.set_max_ack_delay(25);
+            conf.set_congestion_control_algorithm(CongestionControlAlgorithm::Cubic);
+            conf.set_initial_congestion_window(10);
+            conf.set_min_congestion_window(2);
+            conf.set_reset_token_key([1u8; 64]);
+            conf.set_address_token_lifetime(3600);
+            conf.set_send_batch_size(2);
+            conf.set_max_handshake_timeout(0);
+            conf.enable_multipath(false);
+            conf.enable_dplpmtud(true);
+            conf.enable_pacing(false);
+
+            let application_protos = vec![b"h3".to_vec()];
+            let tls_config = if !is_server {
+                TlsConfig::new_client_config(application_protos, true)?
+            } else {
+                let mut tls_config = TlsConfig::new_server_config(
+                    "src/tls/testdata/cert.crt",
+                    "src/tls/testdata/cert.key",
+                    application_protos,
+                    true,
+                )?;
+                tls_config.set_ticket_key(&vec![0x73; 48])?;
+                tls_config
+            };
+            conf.set_tls_config(tls_config);
+
+            Ok(conf)
+        }
+
+        pub fn new_test_config_with_ack_frequency(is_server: bool) -> Result<Config> {
             let mut conf = Config::new()?;
             conf.set_initial_max_data(90);
             conf.set_initial_max_stream_data_bidi_local(50);
@@ -7069,7 +7153,7 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn ack_data_space_ack_timeout() -> Result<()> {
+    fn ack_data_space_ack_timeout_without_ack_frequency() -> Result<()> {
         let mut client_config = TestPair::new_test_config(false)?;
         client_config.set_ack_eliciting_threshold(4);
         client_config.enable_dplpmtud(false);
@@ -7083,7 +7167,6 @@ pub(crate) mod tests {
         let data = Bytes::from_static(b"QUIC");
         let sid = test_pair.client.stream_bidi_new(0, false)?;
         let acked_pkts = test_pair.client.paths.get_active_mut()?.stats().acked_count;
-
         // Client write data on the stream
         test_pair.client.stream_write(sid, data.clone(), false)?;
         let packets = TestPair::conn_packets_out(&mut test_pair.client)?;
@@ -7106,6 +7189,48 @@ pub(crate) mod tests {
         TestPair::conn_packets_in(&mut test_pair.client, packets)?;
         let new_acked_pkts = test_pair.client.paths.get_active_mut()?.stats().acked_count;
         assert_eq!(acked_pkts + 1, new_acked_pkts);
+
+        Ok(())
+    }
+
+
+    #[test]
+    fn ack_data_space_ack_timeout_with_ack_frequency() -> Result<()> {
+        let mut client_config = TestPair::new_test_config_with_ack_frequency(false)?;
+        client_config.set_ack_eliciting_threshold(4);
+        client_config.enable_dplpmtud(false);
+        let mut server_config = TestPair::new_test_config_with_ack_frequency(true)?;
+        server_config.set_ack_eliciting_threshold(4);
+        server_config.enable_dplpmtud(false);
+        let mut test_pair = TestPair::new(&mut client_config, &mut server_config)?;
+        assert_eq!(test_pair.handshake(), Ok(()));
+        test_pair.move_forward()?;
+
+        let data = Bytes::from_static(b"QUIC");
+        let sid = test_pair.client.stream_bidi_new(0, false)?;
+        let acked_pkts = test_pair.client.paths.get_active_mut()?.stats().acked_count;
+        // Client write data on the stream
+        test_pair.client.stream_write(sid, data.clone(), false)?;
+        let packets = TestPair::conn_packets_out(&mut test_pair.client)?;
+
+        // Server recv packets from the client
+        TestPair::conn_packets_in(&mut test_pair.server, packets)?;
+        let packets = TestPair::conn_packets_out(&mut test_pair.server)?;
+        assert_eq!(packets.len(), 0);
+
+        // Advance server ticks until ack timeout
+        assert!(test_pair.server.timeout().is_some());
+        let ack_timeout = test_pair.server.timers.get(Timer::Ack);
+        assert!(ack_timeout.is_some());
+        let now = ack_timeout.unwrap();
+        test_pair.server.on_timeout(now);
+
+        // Server send ack
+        TestPair::conn_packets_in(&mut test_pair.server, packets)?;
+        let packets = TestPair::conn_packets_out(&mut test_pair.server)?;
+        TestPair::conn_packets_in(&mut test_pair.client, packets)?;
+        let new_acked_pkts = test_pair.client.paths.get_active_mut()?.stats().acked_count;
+        assert_eq!(acked_pkts , new_acked_pkts);
 
         Ok(())
     }
@@ -8175,7 +8300,7 @@ pub(crate) mod tests {
 
     #[test]
     fn test_ack_triggering_with_ack_frequency() -> Result<()> {
-        let mut test_pair = TestPair::new_with_test_config()?;
+        let mut test_pair = TestPair::new_with_test_config_with_ack_frequency()?;
         assert_eq!(test_pair.handshake(), Ok(()));
 
         let path_id = test_pair.server.paths.get_active_path_id()?;

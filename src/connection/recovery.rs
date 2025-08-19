@@ -140,7 +140,7 @@ impl Recovery {
     pub(super) fn new(conf: &RecoveryConfig) -> Self {
         Recovery {
             max_ack_delay: conf.max_ack_delay,
-            peer_ack_eliciting_threshold: 1,
+            peer_ack_eliciting_threshold: conf.ack_eliciting_threshold,
             peer_ack_frequency_sequence_number: 0,
             peer_reordering_threshold: 0,
             max_datagram_size: crate::DEFAULT_SEND_UDP_PAYLOAD_SIZE,
@@ -284,7 +284,7 @@ impl Recovery {
         }
 
         // Check if we need to send an ACK based on peer_ack_eliciting_threshold and peer_min_ack_delay
-        if space.ack_eliciting_pkts_since_last_sent_ack > self.peer_ack_eliciting_threshold  {
+        if space.ack_eliciting_pkts_since_last_sent_ack >= self.peer_ack_eliciting_threshold  {
             space.need_send_ack = true;
             space.ack_timer = None;
         } else if space.ack_timer.is_none() {
