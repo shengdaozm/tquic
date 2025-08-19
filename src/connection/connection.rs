@@ -1288,9 +1288,14 @@ impl Connection {
         let active_path = self.paths.get_active_mut()?;
         let max_ack_delay = time::Duration::from_millis(peer_params.max_ack_delay);
         active_path.recovery.max_ack_delay = max_ack_delay;
-        
+
         //TODO: remove the unwarp here
+<<<<<<< HEAD
         // active_path.recovery.peer_min_ack_delay = time::Duration::from_micros(peer_params.min_ack_delay.unwrap());
+=======
+        active_path.recovery.peer_min_ack_delay =
+            time::Duration::from_micros(peer_params.min_ack_delay.unwrap());
+>>>>>>> c34eb0a (format)
 
         let max_datagram_size = peer_params.max_udp_payload_size as usize;
         active_path
@@ -1455,7 +1460,6 @@ impl Connection {
             return Ok(());
         }
 
-
         // In order to assist loss detection at the sender, an endpoint SHOULD
         // generate and send an ACK frame without delay when it receives an
         // ack-eliciting packet either:
@@ -1475,8 +1479,21 @@ impl Connection {
         // All ack-eliciting 0-RTT and 1-RTT packets within its advertised
         // max_ack_delay.
         if space.ack_timer.is_none() {
+<<<<<<< HEAD
             // let ack_delay = time::Duration::from_millis(self.peer_transport_params.max_ack_delay);
+=======
+<<<<<<< HEAD
+>>>>>>> c49d9be (format)
             space.ack_timer = Some(time::Instant::now() + conn_path.recovery.max_ack_delay);
+=======
+            // Use the minimum of peer's requested delay and local max_ack_delay
+            let local_max_ack_delay_duration =
+                time::Duration::from_millis(self.local_transport_params.max_ack_delay);
+            let peer_min_ack_delay = conn_path.recovery.peer_min_ack_delay;
+            let ack_delay = cmp::min(local_max_ack_delay_duration, peer_min_ack_delay);
+
+            space.ack_timer = Some(time::Instant::now() + ack_delay);
+>>>>>>> c34eb0a (format)
             debug!(
                 "{} set ack timer for space {:?}, timeout {:?} ",
                 &self.trace_id, space_id, space.ack_timer
@@ -3441,14 +3458,15 @@ impl Connection {
                             if timer > now {
                                 continue;
                             }
-                            let (lost_pkts, lost_bytes, pto_fired) = path.recovery.on_loss_detection_timeout(
-                                path.space_id,
-                                &mut self.spaces,
-                                handshake_status,
-                                #[cfg(feature = "qlog")]
-                                self.qlog.as_mut(),
-                                now,
-                            );
+                            let (lost_pkts, lost_bytes, pto_fired) =
+                                path.recovery.on_loss_detection_timeout(
+                                    path.space_id,
+                                    &mut self.spaces,
+                                    handshake_status,
+                                    #[cfg(feature = "qlog")]
+                                    self.qlog.as_mut(),
+                                    now,
+                                );
 
                             if pto_fired {
                                 // Per draft-ietf-quic-ack-frequency-11, Section 7, an IMMEDIATE_ACK
@@ -8366,6 +8384,7 @@ fn immediate_ack() -> Result<()> {
         let data = Bytes::from_static(b"hello");
         let stream_id = test_pair.client.stream_bidi_new(0, false)?;
 
+<<<<<<< HEAD
         // --- 2. Test ACK triggering by packet threshold ---
 
         // Send the 1st ACK-eliciting packet
@@ -8440,6 +8459,174 @@ fn immediate_ack() -> Result<()> {
         assert_eq!(server_space.need_send_ack, false, "need_send_ack should be reset after delayed ACK is sent");
         assert!(server_space.ack_timer.is_none(), "ACK timer should be none after delayed ACK is sent");
         assert_eq!(server_space.ack_eliciting_pkts_since_last_sent_ack, 0);
+=======
+        // Send 1st ack-eliciting packet
+        test_pair
+            .client
+            .stream_write(stream_id, data.clone(), false)?;
+        let packets = TestPair::conn_packets_out(&mut test_pair.client)?;
+        test_pair
+            .server
+            .recv(&mut packets[0].0.clone(), &packets[0].1)?;
+        // ACK should not be sent yet
+        assert_eq!(
+            test_pair
+                .server
+                .spaces
+                .get(SpaceId::Data)
+                .unwrap()
+                .need_send_ack,
+            false
+        );
+        assert!(test_pair
+            .server
+            .spaces
+            .get(SpaceId::Data)
+            .unwrap()
+            .ack_timer
+            .is_some());
+        assert_eq!(
+            test_pair
+                .server
+                .spaces
+                .get(SpaceId::Data)
+                .unwrap()
+                .ack_eliciting_pkts_since_last_sent_ack,
+            1
+        );
+
+        // Send 2nd ack-eliciting packet
+        test_pair
+            .client
+            .stream_write(stream_id, data.clone(), false)?;
+        let packets = TestPair::conn_packets_out(&mut test_pair.client)?;
+        test_pair
+            .server
+            .recv(&mut packets[0].0.clone(), &packets[0].1)?;
+        // ACK should not be sent yet (threshold is 3)
+        assert_eq!(
+            test_pair
+                .server
+                .spaces
+                .get(SpaceId::Data)
+                .unwrap()
+                .need_send_ack,
+            false
+        );
+        assert_eq!(
+            test_pair
+                .server
+                .spaces
+                .get(SpaceId::Data)
+                .unwrap()
+                .ack_eliciting_pkts_since_last_sent_ack,
+            2
+        );
+
+        // Send 3rd ack-eliciting packet
+        test_pair
+            .client
+            .stream_write(stream_id, data.clone(), false)?;
+        let packets = TestPair::conn_packets_out(&mut test_pair.client)?;
+        test_pair
+            .server
+            .recv(&mut packets[0].0.clone(), &packets[0].1)?;
+        // ACK should be sent now (threshold reached)
+        assert_eq!(
+            test_pair
+                .server
+                .spaces
+                .get(SpaceId::Data)
+                .unwrap()
+                .need_send_ack,
+            true
+        );
+        assert!(test_pair
+            .server
+            .spaces
+            .get(SpaceId::Data)
+            .unwrap()
+            .ack_timer
+            .is_none());
+        assert_eq!(
+            test_pair
+                .server
+                .spaces
+                .get(SpaceId::Data)
+                .unwrap()
+                .ack_eliciting_pkts_since_last_sent_ack,
+            3
+        );
+
+        // Reset server state for next test
+        test_pair
+            .server
+            .spaces
+            .get_mut(SpaceId::Data)
+            .unwrap()
+            .need_send_ack = false;
+        test_pair
+            .server
+            .spaces
+            .get_mut(SpaceId::Data)
+            .unwrap()
+            .ack_eliciting_pkts_since_last_sent_ack = 0;
+
+        // Test ACK by delay
+        test_pair
+            .client
+            .stream_write(stream_id, data.clone(), false)?;
+        let packets = TestPair::conn_packets_out(&mut test_pair.client)?;
+        test_pair
+            .server
+            .recv(&mut packets[0].0.clone(), &packets[0].1)?;
+        // ACK should not be sent yet
+        assert_eq!(
+            test_pair
+                .server
+                .spaces
+                .get(SpaceId::Data)
+                .unwrap()
+                .need_send_ack,
+            false
+        );
+        assert!(test_pair
+            .server
+            .spaces
+            .get(SpaceId::Data)
+            .unwrap()
+            .ack_timer
+            .is_some());
+
+        // Advance time beyond custom_delay
+        test_pair.server.on_timeout(
+            test_pair
+                .server
+                .spaces
+                .get(SpaceId::Data)
+                .unwrap()
+                .ack_timer
+                .unwrap(),
+        );
+        // ACK should be sent now (delay reached)
+        //TODO: add the call to uupdate the state of the ack timer
+        assert_eq!(
+            test_pair
+                .server
+                .spaces
+                .get(SpaceId::Data)
+                .unwrap()
+                .need_send_ack,
+            true
+        );
+        assert!(test_pair
+            .server
+            .spaces
+            .get(SpaceId::Data)
+            .unwrap()
+            .ack_timer
+            .is_none());
+>>>>>>> c49d9be (format)
 
         Ok(())
     }

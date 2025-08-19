@@ -645,22 +645,13 @@ impl Frame {
             }
 
             Frame::AckFrequency {
-<<<<<<< HEAD
-                frame: AckFrequencyFrame {
-                    sequence_number,
-                    ack_eliciting_threshold,
-                    requested_max_ack_delay,
-                    reordering_threshold,
-                },
-=======
                 frame:
                     AckFrequencyFrame {
                         sequence_number,
                         ack_eliciting_threshold,
-                        update_max_ack_delay,
-                        ignored,
+                        requested_max_ack_delay,
+                        reordering_threshold,
                     },
->>>>>>> ae3fb92 (fix ackFrequency frame bug)
             } => {
                 b.write_varint(0xaf)?;
                 b.write_varint(*sequence_number)?;
@@ -828,22 +819,13 @@ impl Frame {
             Frame::ImmediateAck => 1,
 
             Frame::AckFrequency {
-<<<<<<< HEAD
-                frame: AckFrequencyFrame {
-                    sequence_number,
-                    ack_eliciting_threshold,
-                    requested_max_ack_delay,
-                    reordering_threshold,
-                },
-=======
                 frame:
                     AckFrequencyFrame {
                         sequence_number,
                         ack_eliciting_threshold,
-                        update_max_ack_delay,
-                        ignored,
+                        requested_max_ack_delay,
+                        reordering_threshold,
                     },
->>>>>>> ae3fb92 (fix ackFrequency frame bug)
             } => {
                 // length of frame type (0xaf) is 2
                 2 + codec::encode_varint_len(*sequence_number)
@@ -1213,13 +1195,13 @@ impl std::fmt::Debug for Frame {
             }
 
             Frame::AckFrequency {
-<<<<<<< HEAD
-                frame: AckFrequencyFrame {
-                    sequence_number,
-                    ack_eliciting_threshold,
-                    requested_max_ack_delay,
-                    reordering_threshold,
-                }
+                frame:
+                    AckFrequencyFrame {
+                        sequence_number,
+                        ack_eliciting_threshold,
+                        requested_max_ack_delay,
+                        reordering_threshold,
+                    },
             } => {
                 write!(
                     f,
@@ -1228,20 +1210,6 @@ impl std::fmt::Debug for Frame {
                     ack_eliciting_threshold,
                     requested_max_ack_delay,
                     reordering_threshold,
-=======
-                frame:
-                    AckFrequencyFrame {
-                        sequence_number,
-                        ack_eliciting_threshold,
-                        update_max_ack_delay,
-                        ignored,
-                    },
-            } => {
-                write!(
-                    f,
-                    "ACK_FREQUENCY seq={} threshold={} delay={} ignored={}",
-                    sequence_number, ack_eliciting_threshold, update_max_ack_delay, ignored,
->>>>>>> ae3fb92 (fix ackFrequency frame bug)
                 )?;
             }
 
@@ -1977,7 +1945,7 @@ mod tests {
         };
         assert_eq!(
             format!("{:?}", &frame),
-            "ACK_FREQUENCY seq=1 threshold=2 delay=3 ignored=0"
+            "ACK_FREQUENCY seq=1 threshold=2 delay=3 reorder=0"
         );
 
         let mut buf = [0; 128];
@@ -2003,7 +1971,7 @@ mod tests {
         };
         assert_eq!(
             format!("{:?}", &frame_large),
-            "ACK_FREQUENCY seq=1234567890 threshold=9876543210 delay=1000000000000 ignored=123"
+            "ACK_FREQUENCY seq=1234567890 threshold=9876543210 delay=1000000000000 reorder=123"
         );
 
         let mut buf_large = [0; 128];
@@ -2022,13 +1990,13 @@ mod tests {
             frame: AckFrequencyFrame {
                 sequence_number: 4_611_686_018_427_387_903,
                 ack_eliciting_threshold: 4_611_686_018_427_387_903,
-                update_max_ack_delay: 4_611_686_018_427_387_903,
-                ignored: 123,
+                requested_max_ack_delay: 4_611_686_018_427_387_903,
+                reordering_threshold: 123,
             },
         };
         assert_eq!(
             format!("{:?}", &frame_large),
-            "ACK_FREQUENCY seq=4611686018427387903 threshold=4611686018427387903 delay=4611686018427387903 ignored=123"
+            "ACK_FREQUENCY seq=4611686018427387903 threshold=4611686018427387903 delay=4611686018427387903 reorder=123"
         );
 
         let mut buf_large = [0; 128];
