@@ -60,11 +60,6 @@ pub struct Recovery {
     /// It is used for PTO calculation.
     pub max_ack_delay: Duration,
 
-    /// The minimum amount of time in microseconds by which the endpoint will
-    /// delay sending acknowledgments.
-    /// See draft-ietf-quic-ack-frequency-11.
-    pub peer_min_ack_delay: Duration,
-
     /// The number of ack-eliciting packets that the receiver is willing to
     /// receive before sending an acknowledgement.
     /// See draft-ietf-quic-ack-frequency-11.
@@ -145,7 +140,6 @@ impl Recovery {
     pub(super) fn new(conf: &RecoveryConfig) -> Self {
         Recovery {
             max_ack_delay: conf.max_ack_delay,
-            peer_min_ack_delay: Duration::from_micros(0),
             peer_ack_eliciting_threshold: 1,
             peer_ack_frequency_sequence_number: 0,
             peer_reordering_threshold: 0,
@@ -290,15 +284,15 @@ impl Recovery {
         }
 
         // Check if we need to send an ACK based on peer_ack_eliciting_threshold and peer_min_ack_delay
-        if space.ack_eliciting_pkts_since_last_sent_ack >= self.peer_ack_eliciting_threshold {
+        if space.ack_eliciting_pkts_since_last_sent_ack > self.peer_ack_eliciting_threshold  {
             space.need_send_ack = true;
             space.ack_timer = None;
         } else if space.ack_timer.is_none() {
-            space.ack_timer = Some(now + self.peer_min_ack_delay);
+            space.ack_timer = Some(now + self.max_ack_delay);
         }
 
         // Update RTT estimation
-        // TODO: check ack_delay against amx_ack_delay
+        // TODO: check ack_delay against max_ack_delay
         if let Some(rtt) = rtt_sample {
             // When adjusting an RTT sample using peer-reported acknowledgment
             // delays, an endpoint:

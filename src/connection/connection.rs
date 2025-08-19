@@ -742,7 +742,11 @@ impl Connection {
                 }
                 path.recovery.peer_ack_frequency_sequence_number = frame.sequence_number;
                 path.recovery.peer_ack_eliciting_threshold = frame.ack_eliciting_threshold;
-                path.recovery.peer_min_ack_delay =
+                if frame.requested_max_ack_delay <self.peer_transport_params.min_ack_delay.unwrap() || 
+                    frame.requested_max_ack_delay >  2_u64.pow(14) {
+                    return Err(Error::ProtocolViolation);
+                }
+                path.recovery.max_ack_delay =
                     time::Duration::from_micros(frame.requested_max_ack_delay);
                 path.recovery.peer_reordering_threshold = frame.reordering_threshold;
             }
@@ -1279,7 +1283,7 @@ impl Connection {
         active_path.recovery.max_ack_delay = max_ack_delay;
         
         //TODO: remove the unwarp here
-        active_path.recovery.peer_min_ack_delay = time::Duration::from_micros(peer_params.min_ack_delay.unwrap());
+        // active_path.recovery.peer_min_ack_delay = time::Duration::from_micros(peer_params.min_ack_delay.unwrap());
 
         let max_datagram_size = peer_params.max_udp_payload_size as usize;
         active_path
@@ -1464,12 +1468,7 @@ impl Connection {
         // All ack-eliciting 0-RTT and 1-RTT packets within its advertised
         // max_ack_delay.
         if space.ack_timer.is_none() {
-            // Use the minimum of peer's requested delay and local max_ack_delay
-            let local_max_ack_delay_duration = time::Duration::from_millis(self.local_transport_params.max_ack_delay);
-            let peer_min_ack_delay = conn_path.recovery.peer_min_ack_delay;
-            let ack_delay = cmp::min(local_max_ack_delay_duration, peer_min_ack_delay);
-
-            space.ack_timer = Some(time::Instant::now() + ack_delay);
+            space.ack_timer = Some(time::Instant::now() + conn_path.recovery.max_ack_delay);
             debug!(
                 "{} set ack timer for space {:?}, timeout {:?} ",
                 &self.trace_id, space_id, space.ack_timer
@@ -3432,13 +3431,20 @@ impl Connection {
                 }
 
                 Timer::Ack => {
+                    let support_ack_frequency = self.is_support_ack_frequency();
                     for (_, space) in self.spaces.iter_mut() {
                         if let Some(timer) = space.ack_timer {
                             if timer > now {
                                 continue;
                             }
                             debug!("{} ack timeout for space {:?}", self.trace_id, space.id);
-                            space.need_send_ack = true;
+                            if support_ack_frequency {
+                                if space.ack_eliciting_pkts_since_last_sent_ack > 0 {
+                                    space.need_send_ack = true;
+                                }
+                            } else {
+                                space.need_send_ack = true;
+                            }
                             space.ack_timer = None;
                         }
                     }
@@ -8178,7 +8184,7 @@ pub(crate) mod tests {
         let custom_threshold = 3;
         let custom_delay = Duration::from_millis(500);
         path.recovery.peer_ack_eliciting_threshold = custom_threshold;
-        path.recovery.peer_min_ack_delay = custom_delay;
+        path.recovery.max_ack_delay = custom_delay;
 
         // Send ack-eliciting packets from client to server
         let data = Bytes::from_static(b"hello");
