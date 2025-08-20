@@ -3464,25 +3464,19 @@ impl Connection {
                     let support_ack_frequency = self.is_support_ack_frequency();
                     for (_, space) in self.spaces.iter_mut() {
                         // 使用 if let some() 和 is_some() 来判断定时器是否存在且已超时
-                        if space.ack_timer.is_some() && space.ack_timer.unwrap() <= now {
-                            debug!("{} ack timeout for space {:?}", self.trace_id, space.id);
-                            if support_ack_frequency {
+                        if let Some(timeout) = space.ack_timer {
+                            if timeout <= now {
+                                debug!("{} ack timeout for space {:?}", self.trace_id, space.id);
+
+                                // 统一的逻辑：定时器到期，当且仅当有等待ACK的包时，才触发ACK。
+                                // 这符合 RFC 9000 和 ACK Frequency 扩展的要求。
                                 if space.ack_eliciting_pkts_since_last_sent_ack > 0 {
                                     space.need_send_ack = true;
                                 }
-                                debug!(
-                                    "ack frequency supported and ack_eliciting_pkts_since_last_sent_ack is {}",
-                                    space.ack_eliciting_pkts_since_last_sent_ack
-                                );
-                            } else {
-                                // 只有在收到过ack-eliciting包之后，超时才需要发送ack
-                                // 这是为了避免在没有收到任何需要ack的包时，仅因为一个残留的定时器就发送ack
-                                if space.ack_eliciting_pkts_since_last_sent_ack > 0 {
-                                    space.need_send_ack = true;
-                                }
+
+                                // 定时器已经触发，必须清理
+                                space.ack_timer = None;
                             }
-                            // 清理定时器
-                            space.ack_timer = None;
                         }
                     }
                 }
@@ -8316,68 +8310,100 @@ pub(crate) mod tests {
 
         Ok(())
     }
-
+    
     #[test]
-    fn test_ack_triggering_with_ack_frequency() -> Result<()> {
+    fn test_ack_triggering_by_threshold_and_delay() -> Result<()> {
+        // --- 1. Setup ---
+        // Initialize client and server, complete handshake
         let mut test_pair = TestPair::new_with_test_config_with_ack_frequency()?;
         assert_eq!(test_pair.handshake(), Ok(()));
 
+        // Get the server's active path and directly modify its recovery state to inject custom ACK frequency parameters.
+        // This is to precisely test the server's ACK logic without relying on the client sending ACK_FREQUENCY frames.
         let path_id = test_pair.server.paths.get_active_path_id()?;
         let path = test_pair.server.paths.get_mut(path_id)?;
-        // Set custom ACK frequency parameters directly on the peer's recovery state
         let custom_threshold = 3;
         let custom_delay = Duration::from_millis(500);
         path.recovery.peer_ack_eliciting_threshold = custom_threshold;
         path.recovery.max_ack_delay = custom_delay;
 
-        // Send ack-eliciting packets from client to server
         let data = Bytes::from_static(b"hello");
         let stream_id = test_pair.client.stream_bidi_new(0, false)?;
 
-        // Send 1st ack-eliciting packet
+        // --- 2. Test ACK triggering by packet threshold ---
+
+        // Send the 1st ACK-eliciting packet
         test_pair.client.stream_write(stream_id, data.clone(), false)?;
         let packets = TestPair::conn_packets_out(&mut test_pair.client)?;
         test_pair.server.recv(&mut packets[0].0.clone(), &packets[0].1)?;
-        // ACK should not be sent yet
-        assert_eq!(test_pair.server.spaces.get(SpaceId::Data).unwrap().need_send_ack, false);
-        assert!(test_pair.server.spaces.get(SpaceId::Data).unwrap().ack_timer.is_some());
-        assert_eq!(test_pair.server.spaces.get(SpaceId::Data).unwrap().ack_eliciting_pkts_since_last_sent_ack, 1);
+        
+        // Verification: At this point, ACK should not be sent immediately. The ACK timer should have started, and the counter should be 1.
+        let server_space = test_pair.server.spaces.get(SpaceId::Data).unwrap();
+        assert_eq!(server_space.need_send_ack, false, "ACK should not be needed after 1 packet");
+        assert!(server_space.ack_timer.is_some(), "ACK timer should be set after 1 packet");
+        assert_eq!(server_space.ack_eliciting_pkts_since_last_sent_ack, 1);
 
-        // Send 2nd ack-eliciting packet
+        // Send the 2nd ACK-eliciting packet
         test_pair.client.stream_write(stream_id, data.clone(), false)?;
         let packets = TestPair::conn_packets_out(&mut test_pair.client)?;
         test_pair.server.recv(&mut packets[0].0.clone(), &packets[0].1)?;
-        // ACK should not be sent yet (threshold is 3)
-        assert_eq!(test_pair.server.spaces.get(SpaceId::Data).unwrap().need_send_ack, false);
-        assert_eq!(test_pair.server.spaces.get(SpaceId::Data).unwrap().ack_eliciting_pkts_since_last_sent_ack, 2);
 
-        // Send 3rd ack-eliciting packet
+        // Verification: The threshold of 3 has not yet been reached, so ACK should not be sent. The counter should be 2.
+        let server_space = test_pair.server.spaces.get(SpaceId::Data).unwrap();
+        assert_eq!(server_space.need_send_ack, false, "ACK should not be needed after 2 packets");
+        assert_eq!(server_space.ack_eliciting_pkts_since_last_sent_ack, 2);
+
+        // Send the 3rd ACK-eliciting packet
         test_pair.client.stream_write(stream_id, data.clone(), false)?;
         let packets = TestPair::conn_packets_out(&mut test_pair.client)?;
         test_pair.server.recv(&mut packets[0].0.clone(), &packets[0].1)?;
-        // ACK should be sent now (threshold reached)
-        assert_eq!(test_pair.server.spaces.get(SpaceId::Data).unwrap().need_send_ack, true);
-        assert!(test_pair.server.spaces.get(SpaceId::Data).unwrap().ack_timer.is_none());
-        assert_eq!(test_pair.server.spaces.get(SpaceId::Data).unwrap().ack_eliciting_pkts_since_last_sent_ack, 3);
 
-        // Reset server state for next test
-        test_pair.server.spaces.get_mut(SpaceId::Data).unwrap().need_send_ack = false;
-        test_pair.server.spaces.get_mut(SpaceId::Data).unwrap().ack_eliciting_pkts_since_last_sent_ack = 0;
+        // Verification: The threshold of 3 has been reached, ACK should be ready to send. The ACK timer should be cancelled.
+        let server_space = test_pair.server.spaces.get(SpaceId::Data).unwrap();
+        assert_eq!(server_space.need_send_ack, true, "ACK should be needed after 3 packets");
+        assert!(server_space.ack_timer.is_none(), "ACK timer should be cancelled when threshold is met");
+        assert_eq!(server_space.ack_eliciting_pkts_since_last_sent_ack, 3);
+        
+        // --- 3. Verify state reset after sending the ACK ---
 
-        // Test ACK by delay
+        // Make the server generate an outbound packet; this packet should now contain the triggered ACK frame.
+        let server_packets = TestPair::conn_packets_out(&mut test_pair.server)?;
+        assert!(!server_packets.is_empty(), "Server should send a packet containing the ACK");
+
+        // Verification: After generating the ACK packet, the server's ACK state should be automatically reset.
+        let server_space = test_pair.server.spaces.get(SpaceId::Data).unwrap();
+        assert_eq!(server_space.need_send_ack, false, "need_send_ack should be reset after ACK is sent");
+        assert_eq!(server_space.ack_eliciting_pkts_since_last_sent_ack, 0, "ACK counter should be reset");
+
+        // --- 4. Test ACK triggering by max_ack_delay timer ---
+
+        // The state is now clean, send 1 new ACK-eliciting packet to start the timer.
         test_pair.client.stream_write(stream_id, data.clone(), false)?;
         let packets = TestPair::conn_packets_out(&mut test_pair.client)?;
         test_pair.server.recv(&mut packets[0].0.clone(), &packets[0].1)?;
-        // ACK should not be sent yet
-        assert_eq!(test_pair.server.spaces.get(SpaceId::Data).unwrap().need_send_ack, false);
-        assert!(test_pair.server.spaces.get(SpaceId::Data).unwrap().ack_timer.is_some());
 
-        // Advance time beyond custom_delay
-        test_pair.server.on_timeout(test_pair.server.spaces.get(SpaceId::Data).unwrap().ack_timer.unwrap());
-        // ACK should be sent now (delay reached)
-        //TODO: add the call to uupdate the state of the ack timer
-        assert_eq!(test_pair.server.spaces.get(SpaceId::Data).unwrap().need_send_ack, true);
-        assert!(test_pair.server.spaces.get(SpaceId::Data).unwrap().ack_timer.is_none());
+        // Verification: After receiving the packet, ACK is not sent immediately, but the ACK timer has started.
+        let server_space = test_pair.server.spaces.get(SpaceId::Data).unwrap();
+        assert_eq!(server_space.need_send_ack, false, "ACK should not be needed immediately for delay test");
+        assert!(server_space.ack_timer.is_some(), "ACK timer should be set for delay test");
+        let ack_timeout = server_space.ack_timer.unwrap();
+
+        // Simulate time passing, manually trigger the timeout event.
+        test_pair.server.on_timeout(ack_timeout);
+
+        // Verification: After timeout, the server should mark that it needs to send an ACK.
+        let server_space = test_pair.server.spaces.get(SpaceId::Data).unwrap();
+        assert_eq!(server_space.need_send_ack, true, "ACK should be needed after timer expires");
+
+        // Again, make the server generate a packet to send this delay-triggered ACK.
+        let server_packets_after_delay = TestPair::conn_packets_out(&mut test_pair.server)?;
+        assert!(!server_packets_after_delay.is_empty(), "Server should send a packet for the delayed ACK");
+        
+        // Final verification: After sending the ACK, the state should be reset again, and the timer should also be cleared.
+        let server_space = test_pair.server.spaces.get(SpaceId::Data).unwrap();
+        assert_eq!(server_space.need_send_ack, false, "need_send_ack should be reset after delayed ACK is sent");
+        assert!(server_space.ack_timer.is_none(), "ACK timer should be none after delayed ACK is sent");
+        assert_eq!(server_space.ack_eliciting_pkts_since_last_sent_ack, 0);
 
         Ok(())
     }
