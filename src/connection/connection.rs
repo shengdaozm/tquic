@@ -7240,13 +7240,17 @@ pub(crate) mod tests {
         let now = ack_timeout.unwrap();
         test_pair.server.on_timeout(now);
 
-        // Server send ack
-        TestPair::conn_packets_in(&mut test_pair.server, packets)?;
-        let packets = TestPair::conn_packets_out(&mut test_pair.server)?;
-        TestPair::conn_packets_in(&mut test_pair.client, packets)?;
-        let new_acked_pkts = test_pair.client.paths.get_active_mut()?.stats().acked_count;
-        assert_eq!(acked_pkts , new_acked_pkts);
 
+        // Server should now generate an ACK packet due to the timeout.
+        let packets = TestPair::conn_packets_out(&mut test_pair.server)?;
+        // We expect one packet containing the ACK frame.
+        assert_eq!(packets.len(), 1); 
+        // Client receives the ACK.
+        TestPair::conn_packets_in(&mut test_pair.client, packets)?;
+        // Now, the client's acked packet count should have increased.
+        let new_acked_pkts = test_pair.client.paths.get_active_mut()?.stats().acked_count;
+        // The core assertion: check that the count has increased by 1.
+        assert_eq!(acked_pkts + 1, new_acked_pkts);
         Ok(())
     }
 
