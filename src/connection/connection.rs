@@ -3463,19 +3463,25 @@ impl Connection {
                 Timer::Ack => {
                     let support_ack_frequency = self.is_support_ack_frequency();
                     for (_, space) in self.spaces.iter_mut() {
-                        if let Some(timer) = space.ack_timer {
-                            if timer > now {
-                                continue;
-                            }
+                        // 使用 if let some() 和 is_some() 来判断定时器是否存在且已超时
+                        if space.ack_timer.is_some() && space.ack_timer.unwrap() <= now {
                             debug!("{} ack timeout for space {:?}", self.trace_id, space.id);
                             if support_ack_frequency {
                                 if space.ack_eliciting_pkts_since_last_sent_ack > 0 {
                                     space.need_send_ack = true;
                                 }
-                                debug!("ack frequency support and ack_eliciting_pkts_since_last_sent_ack is {}",space.ack_eliciting_pkts_since_last_sent_ack);
+                                debug!(
+                                    "ack frequency supported and ack_eliciting_pkts_since_last_sent_ack is {}",
+                                    space.ack_eliciting_pkts_since_last_sent_ack
+                                );
                             } else {
-                                space.need_send_ack = true;
+                                // 只有在收到过ack-eliciting包之后，超时才需要发送ack
+                                // 这是为了避免在没有收到任何需要ack的包时，仅因为一个残留的定时器就发送ack
+                                if space.ack_eliciting_pkts_since_last_sent_ack > 0 {
+                                    space.need_send_ack = true;
+                                }
                             }
+                            // 清理定时器
                             space.ack_timer = None;
                         }
                     }
@@ -3725,6 +3731,15 @@ impl Connection {
         self.tls_session.drop_keys(level);
         let mut crypto_streams = self.crypto_streams.borrow_mut();
         crypto_streams.clear(level);
+
+        // Get the space and reset its state, including the ack_timer.
+        if let Some(space) = self.spaces.get_mut(sid) {
+            // This will clear ack_timer, recv_pkt_num_need_ack, etc.
+            // It's important to do this *before* on_pkt_num_space_discarded,
+            // as that function might rely on the old state before clearing it.
+            // A simple way is to replace it with a new, empty space.
+            *space = space::PacketNumSpace::new(sid); // 重置整个 space
+        }
 
         // When Initial and Handshake packet protection keys are discarded, all
         // packets that were sent with those keys can no longer be acknowledged
