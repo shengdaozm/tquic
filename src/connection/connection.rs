@@ -664,9 +664,19 @@ impl Connection {
         let space = self.spaces.get_mut(space_id).ok_or(Error::InternalError)?;
         if space.recv_pkt_num_need_ack.max() < Some(pkt_num) {
             space.largest_rx_pkt_time = info.time;
+
+            if let Some(recv_pkt_num_need_ack) = space.recv_pkt_num_need_ack.max() {
+                space.unrecv_pkt_num_need_report.insert(Range {
+                    start: recv_pkt_num_need_ack + 1,
+                    end: pkt_num,
+                });
+            } else {
+                // TODO: handle first pkt, unrecv_pkt_num_need_report
+            }
         }
         space.recv_pkt_num_win.insert(pkt_num);
         space.recv_pkt_num_need_ack.add_elem(pkt_num);
+        space.unrecv_pkt_num_need_report.remove_elem(pkt_num);
         space.largest_rx_pkt_num = cmp::max(space.largest_rx_pkt_num, pkt_num);
         if !probing_pkt {
             space.largest_rx_non_probing_pkt_num =
@@ -740,12 +750,15 @@ impl Connection {
                 if frame.sequence_number <= path.recovery.peer_ack_frequency_sequence_number {
                     return Err(Error::FrameEncodingError);
                 }
-                path.recovery.peer_ack_frequency_sequence_number = frame.sequence_number;
-                path.recovery.peer_ack_eliciting_threshold = frame.ack_eliciting_threshold;
-                if frame.requested_max_ack_delay <self.peer_transport_params.min_ack_delay.unwrap() || 
-                    frame.requested_max_ack_delay >  2_u64.pow(14) {
+
+                if frame.requested_max_ack_delay < self.peer_transport_params.min_ack_delay.unwrap()
+                    || frame.requested_max_ack_delay > 2_u64.pow(14)
+                {
                     return Err(Error::ProtocolViolation);
                 }
+
+                path.recovery.peer_ack_frequency_sequence_number = frame.sequence_number;
+                path.recovery.peer_ack_eliciting_threshold = frame.ack_eliciting_threshold;
                 path.recovery.max_ack_delay =
                     time::Duration::from_micros(frame.requested_max_ack_delay);
                 path.recovery.peer_reordering_threshold = frame.reordering_threshold;
@@ -1290,13 +1303,7 @@ impl Connection {
         active_path.recovery.max_ack_delay = max_ack_delay;
 
         //TODO: remove the unwarp here
-<<<<<<< HEAD
         // active_path.recovery.peer_min_ack_delay = time::Duration::from_micros(peer_params.min_ack_delay.unwrap());
-=======
-        active_path.recovery.peer_min_ack_delay =
-            time::Duration::from_micros(peer_params.min_ack_delay.unwrap());
->>>>>>> c34eb0a (format)
-
         let max_datagram_size = peer_params.max_udp_payload_size as usize;
         active_path
             .recovery
@@ -1468,32 +1475,45 @@ impl Connection {
         // - when the packet has a packet number larger than the highest-numbered
         // ack-eliciting packet that has been received and there are missing
         // packets between that packet and this packet.
-        if pkt_num < space.largest_rx_ack_eliciting_pkt_num
-            || pkt_num > space.largest_rx_ack_eliciting_pkt_num + 1
-        {
-            space.need_send_ack = true;
-            space.ack_timer = None;
-            return Ok(());
+
+        if conn_path.recovery.peer_reordering_threshold == 1 {
+            if pkt_num < space.largest_rx_ack_eliciting_pkt_num
+                || pkt_num > space.largest_rx_ack_eliciting_pkt_num + 1
+            {
+                space.need_send_ack = true;
+                space.ack_timer = None;
+                return Ok(());
+            }
+        } else if conn_path.recovery.peer_reordering_threshold > 1 {
+            if pkt_num <= space.largest_acked_pkt_num {
+                space.need_send_ack = true;
+                space.ack_timer = None;
+                return Ok(());
+            } else {
+                if let Some(min_val) = space.unrecv_pkt_num_need_report.min() {
+                    if pkt_num.checked_sub(min_val)
+                        >= Some(conn_path.recovery.peer_reordering_threshold)
+                    {
+                        space.need_send_ack = true;
+                        space.ack_timer = None;
+                        return Ok(());
+                    }
+                }
+            }
         }
 
         // All ack-eliciting 0-RTT and 1-RTT packets within its advertised
         // max_ack_delay.
         if space.ack_timer.is_none() {
 <<<<<<< HEAD
+<<<<<<< HEAD
             // let ack_delay = time::Duration::from_millis(self.peer_transport_params.max_ack_delay);
 =======
 <<<<<<< HEAD
 >>>>>>> c49d9be (format)
-            space.ack_timer = Some(time::Instant::now() + conn_path.recovery.max_ack_delay);
 =======
-            // Use the minimum of peer's requested delay and local max_ack_delay
-            let local_max_ack_delay_duration =
-                time::Duration::from_millis(self.local_transport_params.max_ack_delay);
-            let peer_min_ack_delay = conn_path.recovery.peer_min_ack_delay;
-            let ack_delay = cmp::min(local_max_ack_delay_duration, peer_min_ack_delay);
-
-            space.ack_timer = Some(time::Instant::now() + ack_delay);
->>>>>>> c34eb0a (format)
+>>>>>>> c30ae18 (add ack frequency reordering_threshold)
+            space.ack_timer = Some(time::Instant::now() + conn_path.recovery.max_ack_delay);
             debug!(
                 "{} set ack timer for space {:?}, timeout {:?} ",
                 &self.trace_id, space_id, space.ack_timer
@@ -1514,6 +1534,7 @@ impl Connection {
                     Frame::Ack { ack_ranges, .. } => {
                         if let Some(largest_acked) = ack_ranges.max() {
                             space.recv_pkt_num_need_ack.remove_until(largest_acked);
+                            space.largest_acked_pkt_num = largest_acked;
                         }
                     }
 
