@@ -752,6 +752,13 @@ impl Connection {
             }
 
             Frame::ImmediateAck => {
+                // An endpoint that receives an IMMEDIATE_ACK frame that it does not understand
+                // MUST treat this as a connection error of type FRAME_ENCODING_ERROR.
+                if !self.is_support_ack_frequency() {
+                    println!("不能收到immediate_ack帧");
+                    return Err(Error::FrameEncodingError);
+                }
+
                 let space = self.spaces.get_mut(space_id).ok_or(Error::InternalError)?;
                 // An endpoint SHOULD send a packet containing an ACK frame
                 // immediately upon receiving an IMMEDIATE_ACK frame.
@@ -2186,10 +2193,12 @@ impl Connection {
         }
 
         // Per draft-ietf-quic-ack-frequency-11, Section 8.3, bundle IMMEDIATE_ACK with PMTU probes.
-        let frame = frame::Frame::ImmediateAck;
-        Connection::write_frame_to_packet(frame, buf, st)?;
-        st.ack_eliciting = true;
-        st.in_flight = true;
+        if self.is_support_ack_frequency() {
+            let frame = frame::Frame::ImmediateAck;
+            Connection::write_frame_to_packet(frame, buf, st)?;
+            st.ack_eliciting = true;
+            st.in_flight = true;
+        }
 
         // The content of the PMTU probe is limited to PING and PADDING frames.
         let frame = frame::Frame::Ping {
@@ -2721,8 +2730,9 @@ impl Connection {
             return Ok(());
         }
 
+        let is_support_ack_frequency = self.is_support_ack_frequency();
         let path = self.paths.get_mut(path_id)?;
-        if !path.need_send_immediate_ack {
+        if !path.need_send_immediate_ack || !is_support_ack_frequency {
             return Ok(());
         }
 
@@ -3424,6 +3434,7 @@ impl Connection {
             match timer {
                 Timer::LossDetection => {
                     let mut pto_fired_on_any_path = false;
+                    let is_support_ack_frequency = self.is_support_ack_frequency();
                     for (_, path) in self.paths.iter_mut() {
                         if let Some(timer) = path.recovery.loss_detection_timer() {
                             if timer > now {
@@ -3441,7 +3452,9 @@ impl Connection {
                             if pto_fired {
                                 // Per draft-ietf-quic-ack-frequency-11, Section 7, an IMMEDIATE_ACK
                                 // frame can be included in a PTO packet.
-                                path.need_send_immediate_ack = true;
+                                if is_support_ack_frequency {
+                                    path.need_send_immediate_ack = true;
+                                }
                                 pto_fired_on_any_path = true;
                             }
 
@@ -3911,6 +3924,10 @@ impl Connection {
     /// If `path_addr` is `None`, an IMMEDIATE_ACK frame will be sent on each active path.
     /// Otherwise, an IMMEDIATE_ACK frame will be sent on the specified path.
     pub fn immediate_ack(&mut self, path_addr: Option<FourTuple>) -> Result<()> {
+        // if ack_freqency is not supported, do nothing.
+        if !self.is_support_ack_frequency() {
+            return Ok(());
+        }
         self.mark_tickable(true);
         self.paths.mark_immediate_ack(path_addr)
     }
@@ -3950,12 +3967,15 @@ impl Connection {
             self.cids.mark_dcid_used(dcid_seq, pid)?;
         }
 
+        let is_support_ack_frequency = self.is_support_ack_frequency();
         let path = self.paths.get_mut(pid)?;
         path.initiate_path_chal();
 
         // Per draft-ietf-quic-ack-frequency-11, Section 8.4, a client can send an
         // IMMEDIATE_ACK on a new path to get faster feedback.
-        path.need_send_immediate_ack = true;
+        if is_support_ack_frequency {
+            path.need_send_immediate_ack = true;
+        }
 
         // Create packet number space for the path when Multipath QUIC is enabled.
         if self.flags.contains(EnableMultipath) {
@@ -6638,70 +6658,78 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn immediate_ack() -> Result<()> {
-        // Configure the server to delay sending ACKs.
-        let mut client_config = TestPair::new_test_config(false)?;
-        let mut server_config = TestPair::new_test_config(true)?;
-        server_config.set_ack_eliciting_threshold(10); // Set a high ack-eliciting threshold.
-        server_config.set_max_ack_delay(5000); // Set a long max_ack_delay.
+fn immediate_ack() -> Result<()> {
+    // Configure the server to delay sending ACKs.
+    let mut client_config = TestPair::new_test_config(false)?;
+    let mut server_config = TestPair::new_test_config(true)?;
 
-        let mut test_pair = TestPair::new(&mut client_config, &mut server_config)?;
-        test_pair.handshake()?;
-        test_pair.move_forward()?;
+    // A small value like 25 microseconds is typical.
+    client_config.local_transport_params.min_ack_delay = Some(25);
+    server_config.local_transport_params.min_ack_delay = Some(25);
 
-        // Client sends an ack-eliciting packet (PING).
-        test_pair.build_packet_and_send(
-            PacketType::OneRTT,
-            &[frame::Frame::Ping { pmtu_probe: None }],
-            false, // from client
-        )?;
+    server_config.set_ack_eliciting_threshold(10); // Set a high ack-eliciting threshold.
+    server_config.set_max_ack_delay(5000); // Set a long max_ack_delay.
 
-        // Verify that the server does not send an ACK yet due to the high
-        // threshold and long delay.
-        let space = test_pair.server.spaces.get(SpaceId::Data).unwrap();
-        assert_eq!(space.ack_eliciting_pkts_since_last_sent_ack, 1);
-        assert!(space.ack_timer.is_some());
-        assert!(
-            TestPair::conn_packets_out(&mut test_pair.server)?.is_empty(),
-            "Server should not send an ACK immediately"
-        );
+    let mut test_pair = TestPair::new(&mut client_config, &mut server_config)?;
+    test_pair.handshake()?;
+    test_pair.move_forward()?;
 
-        // Client now requests an immediate ack via the API.
-        test_pair.client.immediate_ack(None)?;
-        assert!(
-            test_pair.client.paths.get_active()?.need_send_immediate_ack,
-            "Client path should be marked to send IMMEDIATE_ACK"
-        );
+    assert!(test_pair.client.is_support_ack_frequency());
+    assert!(test_pair.server.is_support_ack_frequency());
 
-        // Client sends a packet, which should contain the IMMEDIATE_ACK frame.
-        let packets = TestPair::conn_packets_out(&mut test_pair.client)?;
-        assert!(!packets.is_empty(), "Client should send a packet");
-        assert!(
-            !test_pair.client.paths.get_active()?.need_send_immediate_ack,
-            "Flag should be cleared after sending"
-        );
+    // Client sends an ack-eliciting packet (PING).
+    test_pair.build_packet_and_send(
+        PacketType::OneRTT,
+        &[frame::Frame::Ping { pmtu_probe: None }],
+        false, // from client
+    )?;
 
-        // Server receives this packet.
-        TestPair::conn_packets_in(&mut test_pair.server, packets)?;
+    // Verify that the server does not send an ACK yet due to the high
+    // threshold and long delay.
+    let space = test_pair.server.spaces.get(SpaceId::Data).unwrap();
+    assert_eq!(space.ack_eliciting_pkts_since_last_sent_ack, 1);
+    assert!(space.ack_timer.is_some());
+    assert!(
+        TestPair::conn_packets_out(&mut test_pair.server)?.is_empty(),
+        "Server should not send an ACK immediately"
+    );
 
-        // Verify that the server now sends an ACK immediately.
-        let space = test_pair.server.spaces.get(SpaceId::Data).unwrap();
-        assert!(
-            space.need_send_ack,
-            "Server needs to send ACK after receiving IMMEDIATE_ACK"
-        );
-        assert!(
-            space.ack_timer.is_none(),
-            "ACK timer should be cleared after receiving IMMEDIATE_ACK"
-        );
-        let server_response = TestPair::conn_packets_out(&mut test_pair.server)?;
-        assert!(
-            !server_response.is_empty(),
-            "Server should send an ACK packet immediately"
-        );
+    // Client now requests an immediate ack via the API.
+    test_pair.client.immediate_ack(None)?;
+    assert!(
+        test_pair.client.paths.get_active()?.need_send_immediate_ack,
+        "Client path should be marked to send IMMEDIATE_ACK"
+    );
 
-        Ok(())
-    }
+    // Client sends a packet, which should contain the IMMEDIATE_ACK frame.
+    let packets = TestPair::conn_packets_out(&mut test_pair.client)?;
+    assert!(!packets.is_empty(), "Client should send a packet");
+    assert!(
+        !test_pair.client.paths.get_active()?.need_send_immediate_ack,
+        "Flag should be cleared after sending"
+    );
+
+    // Server receives this packet.
+    TestPair::conn_packets_in(&mut test_pair.server, packets)?;
+
+    // Verify that the server now sends an ACK immediately.
+    let space = test_pair.server.spaces.get(SpaceId::Data).unwrap();
+    assert!(
+        space.need_send_ack,
+        "Server needs to send ACK after receiving IMMEDIATE_ACK"
+    );
+    assert!(
+        space.ack_timer.is_none(),
+        "ACK timer should be cleared after receiving IMMEDIATE_ACK"
+    );
+    let server_response = TestPair::conn_packets_out(&mut test_pair.server)?;
+    assert!(
+        !server_response.is_empty(),
+        "Server should send an ACK packet immediately"
+    );
+
+    Ok(())
+}
 
     #[test]
     fn conn_basic_operations() -> Result<()> {
