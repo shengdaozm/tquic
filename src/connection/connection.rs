@@ -1468,6 +1468,7 @@ impl Connection {
         // All ack-eliciting 0-RTT and 1-RTT packets within its advertised
         // max_ack_delay.
         if space.ack_timer.is_none() {
+            // let ack_delay = time::Duration::from_millis(self.peer_transport_params.max_ack_delay);
             space.ack_timer = Some(time::Instant::now() + conn_path.recovery.max_ack_delay);
             debug!(
                 "{} set ack timer for space {:?}, timeout {:?} ",
@@ -6559,7 +6560,11 @@ pub(crate) mod tests {
                 let packets = TestPair::conn_packets_out(&mut test_pair.server)?;
                 TestPair::conn_packets_in(&mut test_pair.client, packets)?;
             }
-
+            if test_pair.client.timeout().is_some() {
+                warn!("======握手阶段======");
+                warn!("路径探测包丢失，目前定时器有");
+                warn!("Timer:{}", test_pair.client.timers);
+            }
             // Path MTU searching
             let data = Bytes::from_static(b"data");
             for i in 0..30 {
@@ -6572,6 +6577,9 @@ pub(crate) mod tests {
                 TestPair::conn_packets_in(&mut test_pair.client, packets)?;
 
                 if test_pair.client.timeout().is_some() {
+                    warn!("======router_mtu:{},第{}次探测======",router_mtu, i);
+                    warn!("路径探测包丢失，目前定时器有");
+                    warn!("Timer:{}", test_pair.client.timers);
                     let timeout = test_pair.client.timers.get(Timer::LossDetection);
                     test_pair.client.on_timeout(timeout.unwrap());
                 }

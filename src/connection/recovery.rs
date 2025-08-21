@@ -283,14 +283,6 @@ impl Recovery {
             return Ok((0, 0));
         }
 
-        // Check if we need to send an ACK based on peer_ack_eliciting_threshold and peer_min_ack_delay
-        if space.ack_eliciting_pkts_since_last_sent_ack >= self.peer_ack_eliciting_threshold  {
-            space.need_send_ack = true;
-            space.ack_timer = None;
-        } else if space.ack_timer.is_none() {
-            space.ack_timer = Some(now + self.max_ack_delay);
-        }
-
         // Update RTT estimation
         // TODO: check ack_delay against max_ack_delay
         if let Some(rtt) = rtt_sample {
