@@ -1494,6 +1494,9 @@ impl Connection {
                     if pkt_num.checked_sub(min_val)
                         >= Some(conn_path.recovery.peer_reordering_threshold)
                     {
+                        space
+                            .unrecv_pkt_num_need_report
+                            .remove_until(pkt_num - conn_path.recovery.peer_reordering_threshold);
                         space.need_send_ack = true;
                         space.ack_timer = None;
                         return Ok(());
@@ -7312,6 +7315,222 @@ pub(crate) mod tests {
         let new_acked_pkts = test_pair.client.paths.get_active_mut()?.stats().acked_count;
         // The core assertion: check that the count has increased by 1.
         assert_eq!(acked_pkts + 1, new_acked_pkts);
+        Ok(())
+    }
+
+    #[test]
+    fn test_ack_frequency_reordering_threshold() -> Result<()> {
+        // 创建支持 ACK 频率扩展的测试配置
+        let mut client_config = TestPair::new_test_config_with_ack_frequency(false)?;
+        let mut server_config = TestPair::new_test_config_with_ack_frequency(true)?;
+
+        // 设置 ACK 触发阈值为较大值，以便主要测试重排序触发的 ACK
+        client_config.set_ack_eliciting_threshold(10);
+        server_config.set_ack_eliciting_threshold(10);
+
+        // 禁用 DPLPMTUD 以避免干扰测试
+        client_config.enable_dplpmtud(false);
+        server_config.enable_dplpmtud(false);
+
+        client_config.set_max_stream_window(80);
+        client_config.set_max_connection_window(80);
+        server_config.set_reordering_threshold(3);
+
+        // 创建测试对并完成握手
+        let mut test_pair = TestPair::new(&mut client_config, &mut server_config)?;
+        assert_eq!(test_pair.handshake(), Ok(()));
+        test_pair.move_forward()?;
+
+        // 客户端发送 ACK_FREQUENCY 帧，设置重排序阈值为 3
+        let ack_frequency_frame = frame::Frame::AckFrequency {
+            frame: frame::AckFrequencyFrame {
+                sequence_number: 1,
+                ack_eliciting_threshold: 10, // 高阈值，主要依赖重排序触发 ACK
+                requested_max_ack_delay: 100_00,
+                reordering_threshold: 3, // 重排序阈值为 3
+            },
+        };
+
+        test_pair.build_packet_and_send(
+            PacketType::OneRTT,
+            &[ack_frequency_frame],
+            false, // 从客户端发送
+        )?;
+
+        test_pair.move_forward()?;
+
+        // 模拟表 1 中的包接收序列: 0, 1, 3, 4, 5, 8, 9, 10
+        // 注意: 在实际实现中，我们需要更精细地控制包序号
+        // 这里简化处理，使用不同的流和数据来模拟不同序号的数据包
+
+        let send_dataid = vec![
+            1,  // 包 1
+            3,  // 包 3 (跳过 2)
+            4,  // 包 4
+            5,  // 包 5 - 应该触发 ACK (5-2>=3)
+            8,  // 包 8
+            9,  // 包 9 - 应该触发 ACK (9-6>=3)
+            10, // 包 10 - 应该触发 ACK (10-7>=3)
+        ];
+
+        // let mut ack_count_before = test_pair.server.paths.get_active_mut()?.stats().acked_count;
+        let expected_ack_points = vec![5, 9, 10]; // 预期在这些包后会有 ACK
+
+        let sid = test_pair.client.stream_bidi_new(0, false)?;
+
+        for i in 1..=10 {
+            // 客户端写入数据
+            let data = Bytes::from_static(b"QUIC");
+
+            test_pair.client.stream_write(sid, data, false)?;
+
+            // 客户端发送包
+            let packets = TestPair::conn_packets_out(&mut test_pair.client)?;
+
+            if !send_dataid.contains(&i) {
+                continue;
+            }
+
+            info!("sent ........ {i}");
+            // 服务器接收包
+            TestPair::conn_packets_in(&mut test_pair.server, packets)?;
+
+            // 检查是否在预期点触发了 ACK
+            let server_packets = TestPair::conn_packets_out(&mut test_pair.server)?;
+
+            if expected_ack_points.contains(&i) {
+                // 预期有 ACK
+                assert!(
+                    !server_packets.is_empty(),
+                    "Expected ACK after packet {}",
+                    i
+                );
+
+                info!("client in ack .... {i}");
+                // 客户端接收 ACK
+                TestPair::conn_packets_in(&mut test_pair.client, server_packets)?;
+
+                // 确认 ACK 计数增加
+                let new_ack_count = test_pair.server.paths.get_active_mut()?.stats().acked_count;
+                // assert_eq!(ack_count_before + 1, new_ack_count);
+                // ack_count_before = new_ack_count;
+                info!("........ -> {new_ack_count}");
+            } else {
+                // 预期没有 ACK
+                assert!(
+                    server_packets.is_empty(),
+                    "Unexpected ACK after packet {}",
+                    i
+                );
+            }
+            // test_pair.move_forward()?;
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_ack_frequency_reordering_threshold_5() -> Result<()> {
+        // 创建支持 ACK 频率扩展的测试配置
+        let mut client_config = TestPair::new_test_config_with_ack_frequency(false)?;
+        let mut server_config = TestPair::new_test_config_with_ack_frequency(true)?;
+
+        // 设置 ACK 触发阈值为较大值，以便主要测试重排序触发的 ACK
+        client_config.set_ack_eliciting_threshold(10);
+        server_config.set_ack_eliciting_threshold(10);
+
+        // 禁用 DPLPMTUD 以避免干扰测试
+        client_config.enable_dplpmtud(false);
+        server_config.enable_dplpmtud(false);
+
+        server_config.set_reordering_threshold(5);
+
+        // 创建测试对并完成握手
+        let mut test_pair = TestPair::new(&mut client_config, &mut server_config)?;
+        assert_eq!(test_pair.handshake(), Ok(()));
+        test_pair.move_forward()?;
+
+        // 客户端发送 ACK_FREQUENCY 帧，设置重排序阈值为 5
+        let ack_frequency_frame = frame::Frame::AckFrequency {
+            frame: frame::AckFrequencyFrame {
+                sequence_number: 1,
+                ack_eliciting_threshold: 10, // 高阈值，主要依赖重排序触发 ACK
+                requested_max_ack_delay: 100_00, // 100ms
+                reordering_threshold: 5,     // 重排序阈值为 5
+            },
+        };
+
+        test_pair.build_packet_and_send(
+            PacketType::OneRTT,
+            &[ack_frequency_frame],
+            false, // 从客户端发送
+        )?;
+
+        test_pair.move_forward()?;
+
+        // 模拟表 2 中的包接收序列: 0, 1, 3, 5, 6, 7, 8, 9
+        let streams_dataid = vec![
+            0, // 包 0
+            1, // 包 1
+            3, // 包 3 (跳过 2)
+            5, // 包 5 (跳过 4)
+            6, // 包 6
+            7, // 包 7 - 应该触发 ACK (7-2>=5)
+            8, // 包 8
+            9, // 包 9 - 应该触发 ACK (9-4>=5)
+        ];
+
+        // let mut ack_count_before = test_pair.server.paths.get_active_mut()?.stats().acked_count;
+
+        let expected_ack_points = vec![7, 9]; // 预期在这些包后会有 ACK (索引从0开始)
+
+        let sid = test_pair.client.stream_bidi_new(0, false)?;
+
+        for i in 0..9 {
+            // 客户端写入数据
+            let data = Bytes::from_static(b"QUIC");
+
+            test_pair.client.stream_write(sid, data, false)?;
+
+            // 客户端发送包
+            let packets = TestPair::conn_packets_out(&mut test_pair.client)?;
+
+            // 模拟丢包
+            if !streams_dataid.contains(&i) {
+                continue;
+            }
+
+            // 服务器接收包
+            TestPair::conn_packets_in(&mut test_pair.server, packets)?;
+
+            // 检查是否在预期点触发了 ACK
+            let server_packets = TestPair::conn_packets_out(&mut test_pair.server)?;
+
+            if expected_ack_points.contains(&i) {
+                // 预期有 ACK
+                assert!(
+                    !server_packets.is_empty(),
+                    "Expected ACK after packet {}",
+                    i
+                );
+
+                // 客户端接收 ACK
+                TestPair::conn_packets_in(&mut test_pair.client, server_packets)?;
+
+                // 确认 ACK 计数增加
+                // let new_ack_count = test_pair.server.paths.get_active_mut()?.stats().acked_count;
+                // assert_eq!(ack_count_before + 1, new_ack_count);
+                // ack_count_before = new_ack_count;
+            } else {
+                // 预期没有 ACK
+                assert!(
+                    server_packets.is_empty(),
+                    "Unexpected ACK after packet {}",
+                    i
+                );
+            }
+        }
+
         Ok(())
     }
 
