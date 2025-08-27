@@ -1494,9 +1494,6 @@ impl Connection {
                     if pkt_num.checked_sub(min_val)
                         >= Some(conn_path.recovery.peer_reordering_threshold)
                     {
-                        space
-                            .unrecv_pkt_num_need_report
-                            .remove_until(pkt_num - conn_path.recovery.peer_reordering_threshold);
                         space.need_send_ack = true;
                         space.ack_timer = None;
                         return Ok(());
@@ -1529,7 +1526,6 @@ impl Connection {
                     Frame::Ack { ack_ranges, .. } => {
                         if let Some(largest_acked) = ack_ranges.max() {
                             space.recv_pkt_num_need_ack.remove_until(largest_acked);
-                            space.largest_acked_pkt_num = largest_acked;
                         }
                     }
 
@@ -2285,6 +2281,23 @@ impl Connection {
         Connection::write_frame_to_packet(frame, out, st)?;
         space.need_send_ack = false;
         space.ack_eliciting_pkts_since_last_sent_ack = 0;
+
+        // update largest acked_pkt_num
+        if let Some(max_need_ack_id) = space.recv_pkt_num_need_ack.max() {
+            space.largest_acked_pkt_num = space.largest_acked_pkt_num.max(max_need_ack_id);
+        }
+
+        // update unrecv_pkt_num_need_report
+        // pktid < largest_rx_ack_eliciting_pkt_num - reordering_threshold
+        // mark reported missing
+        let max_val = space.largest_rx_ack_eliciting_pkt_num;
+        let conn_path = self.paths.get_mut(path_id).unwrap();
+
+        if max_val >= conn_path.recovery.peer_reordering_threshold {
+            space
+                .unrecv_pkt_num_need_report
+                .remove_until(max_val - conn_path.recovery.peer_reordering_threshold);
+        }
 
         Ok(())
     }
@@ -7423,7 +7436,6 @@ pub(crate) mod tests {
                     i
                 );
             }
-            // test_pair.move_forward()?;
         }
 
         Ok(())
@@ -7523,6 +7535,107 @@ pub(crate) mod tests {
                 // ack_count_before = new_ack_count;
             } else {
                 // 预期没有 ACK
+                assert!(
+                    server_packets.is_empty(),
+                    "Unexpected ACK after packet {}",
+                    i
+                );
+            }
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_ack_frequency_eliciting_threshold_after_update_reordering_threshold() -> Result<()> {
+        // creat ack frequency config
+        let mut client_config = TestPair::new_test_config_with_ack_frequency(false)?;
+        let mut server_config = TestPair::new_test_config_with_ack_frequency(true)?;
+
+        // setiting eliciting threshold 3
+        client_config.set_ack_eliciting_threshold(3);
+        server_config.set_ack_eliciting_threshold(3);
+
+        client_config.enable_dplpmtud(false);
+        server_config.enable_dplpmtud(false);
+
+        client_config.set_max_stream_window(80);
+        client_config.set_max_connection_window(80);
+        server_config.set_reordering_threshold(3);
+
+        // creat testpair and handshake
+        let mut test_pair = TestPair::new(&mut client_config, &mut server_config)?;
+        assert_eq!(test_pair.handshake(), Ok(()));
+        test_pair.move_forward()?;
+
+        let ack_frequency_frame = frame::Frame::AckFrequency {
+            frame: frame::AckFrequencyFrame {
+                sequence_number: 1,
+                ack_eliciting_threshold: 3,
+                requested_max_ack_delay: 100_00,
+                reordering_threshold: 3,
+            },
+        };
+
+        test_pair.build_packet_and_send(
+            PacketType::OneRTT,
+            &[ack_frequency_frame],
+            false, // client
+        )?;
+
+        let server_space = test_pair.server.spaces.get_mut(SpaceId::Data).unwrap();
+        server_space.need_send_ack = true;
+        test_pair.move_forward()?;
+
+        let send_dataid = vec![
+            2,  // packet 2
+            3,  // packet 3
+            4,  // packet 4 - need ACK (1,3,4 eliciting_threshold) and mark unreported
+            5,  // packet 5
+            8,  // packet 8
+            9,  // packet 9 - need ACK (5 8 9  eliciting_threshold)
+            10, // packet 10 - need ACK (10-7>=3)
+        ];
+
+        // let mut ack_count_before = test_pair.server.paths.get_active_mut()?.stats().acked_count;
+        let expected_ack_points = vec![4, 9, 10];
+
+        let sid = test_pair.client.stream_bidi_new(0, false)?;
+
+        for i in 1..=10 {
+            // client write data
+            let data = Bytes::from_static(b"QUIC");
+
+            test_pair.client.stream_write(sid, data, false)?;
+
+            // client send data
+            let packets = TestPair::conn_packets_out(&mut test_pair.client)?;
+
+            if !send_dataid.contains(&i) {
+                continue;
+            }
+
+            // server recv
+            TestPair::conn_packets_in(&mut test_pair.server, packets)?;
+
+            // check ack
+            let server_packets = TestPair::conn_packets_out(&mut test_pair.server)?;
+
+            if expected_ack_points.contains(&i) {
+                // Expected ACK
+                assert!(
+                    !server_packets.is_empty(),
+                    "Expected ACK after packet {}",
+                    i
+                );
+
+                TestPair::conn_packets_in(&mut test_pair.client, server_packets)?;
+
+                let new_ack_count = test_pair.server.paths.get_active_mut()?.stats().acked_count;
+                // assert_eq!(ack_count_before + 1, new_ack_count);
+                // ack_count_before = new_ack_count;
+            } else {
+                // Unexpected ACK
                 assert!(
                     server_packets.is_empty(),
                     "Unexpected ACK after packet {}",
