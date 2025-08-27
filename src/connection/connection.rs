@@ -7648,6 +7648,121 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn test_ack_frequency_reordering_threshold_recv_less_largest_acked() -> Result<()> {
+        // When an ack-eliciting packet is received with a packet number less
+        // than Largest Acked, this still triggers an immediate acknowledgement
+        // in an effort to avoid the packet being spuriously declared lost.
+
+        // creat ack frequency config
+        let mut client_config = TestPair::new_test_config_with_ack_frequency(false)?;
+        let mut server_config = TestPair::new_test_config_with_ack_frequency(true)?;
+
+        // setiting eliciting threshold 3
+        client_config.set_ack_eliciting_threshold(3);
+        server_config.set_ack_eliciting_threshold(3);
+
+        client_config.enable_dplpmtud(false);
+        server_config.enable_dplpmtud(false);
+
+        server_config.set_reordering_threshold(3);
+
+        // creat testpair and handshake
+        let mut test_pair = TestPair::new(&mut client_config, &mut server_config)?;
+        assert_eq!(test_pair.handshake(), Ok(()));
+        test_pair.move_forward()?;
+
+        let ack_frequency_frame = frame::Frame::AckFrequency {
+            frame: frame::AckFrequencyFrame {
+                sequence_number: 1,
+                ack_eliciting_threshold: 3,
+                requested_max_ack_delay: 100_00,
+                reordering_threshold: 3,
+            },
+        };
+
+        test_pair.build_packet_and_send(
+            PacketType::OneRTT,
+            &[ack_frequency_frame],
+            false, // client
+        )?;
+
+        let server_space = test_pair.server.spaces.get_mut(SpaceId::Data).unwrap();
+        server_space.need_send_ack = true;
+        test_pair.move_forward()?;
+
+        let send_dataid = vec![
+            1, // packet 1
+            2, // packet 2
+            3, // packet 3 - need ACK ( eliciting_threshold)
+        ];
+
+        let expected_ack_points = vec![3];
+
+        let sid = test_pair.client.stream_bidi_new(0, false)?;
+
+        // client write data
+        let data = Bytes::from_static(b"QUIC");
+
+        test_pair.client.stream_write(sid, data, false)?;
+
+        // client send data
+        // FIRST packet
+        let first_packets = TestPair::conn_packets_out(&mut test_pair.client)?;
+
+        for i in 1..=3 {
+            // client write data
+            let data = Bytes::from_static(b"QUIC");
+
+            test_pair.client.stream_write(sid, data, false)?;
+
+            // client send data
+            let packets = TestPair::conn_packets_out(&mut test_pair.client)?;
+
+            if !send_dataid.contains(&i) {
+                continue;
+            }
+
+            // server recv
+            TestPair::conn_packets_in(&mut test_pair.server, packets)?;
+
+            // check ack
+            let server_packets = TestPair::conn_packets_out(&mut test_pair.server)?;
+
+            if expected_ack_points.contains(&i) {
+                // Expected ACK
+                assert!(
+                    !server_packets.is_empty(),
+                    "Expected ACK after packet {}",
+                    i
+                );
+
+                TestPair::conn_packets_in(&mut test_pair.client, server_packets)?;
+            } else {
+                // Unexpected ACK
+                assert!(
+                    server_packets.is_empty(),
+                    "Unexpected ACK after packet {}",
+                    i
+                );
+            }
+        }
+
+        TestPair::conn_packets_in(&mut test_pair.server, first_packets)?;
+
+        let server_space = test_pair.server.spaces.get(SpaceId::Data).unwrap();
+        assert!(server_space.need_send_ack);
+
+        let server_packets = TestPair::conn_packets_out(&mut test_pair.server)?;
+
+        // Expected ACK
+        assert!(!server_packets.is_empty(), "Expected ACK after packet 0");
+
+        TestPair::conn_packets_in(&mut test_pair.client, server_packets)?;
+
+        Ok(())
+    }
+
+    #[test]
     fn conn_close_by_application() -> Result<()> {
         // Establish a connection
         let mut test_pair = TestPair::new_with_test_config()?;
