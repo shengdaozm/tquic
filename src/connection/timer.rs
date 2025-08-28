@@ -12,8 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::time::Instant;
 use std::fmt;
+use std::time::Instant;
 
 use strum::EnumCount;
 use strum_macros::EnumCount;

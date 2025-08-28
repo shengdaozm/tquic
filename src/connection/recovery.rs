@@ -608,7 +608,7 @@ impl Recovery {
     /// When the loss detection timer expires, the timer's mode determines the
     /// action to be performed.
     /// See RFC 9002 Section A.10. On Timeout
-    /// 
+    ///
     /// The return value is (lost_packets, lost_bytes, pto_fired).
     pub(super) fn on_loss_detection_timeout(
         &mut self,

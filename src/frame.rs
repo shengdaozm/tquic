@@ -167,9 +167,7 @@ pub enum Frame {
 
     /// ACK_FREQUENCY frame (type=0xaf) is used to inform the peer of the
     /// desired frequency of acknowledgements.
-    AckFrequency {
-        frame: AckFrequencyFrame,
-    },
+    AckFrequency { frame: AckFrequencyFrame },
 
     /// PATH_ABANDON frame informs the peer to abandon a path.
     /// See draft-ietf-quic-multipath-05.
@@ -646,12 +644,13 @@ impl Frame {
             }
 
             Frame::AckFrequency {
-                frame: AckFrequencyFrame {
-                    sequence_number,
-                    ack_eliciting_threshold,
-                    requested_max_ack_delay,
-                    reordering_threshold,
-                },
+                frame:
+                    AckFrequencyFrame {
+                        sequence_number,
+                        ack_eliciting_threshold,
+                        requested_max_ack_delay,
+                        reordering_threshold,
+                    },
             } => {
                 b.write_varint(0xaf)?;
                 b.write_varint(*sequence_number)?;
@@ -819,12 +818,13 @@ impl Frame {
             Frame::ImmediateAck => 1,
 
             Frame::AckFrequency {
-                frame: AckFrequencyFrame {
-                    sequence_number,
-                    ack_eliciting_threshold,
-                    requested_max_ack_delay,
-                    reordering_threshold,
-                },
+                frame:
+                    AckFrequencyFrame {
+                        sequence_number,
+                        ack_eliciting_threshold,
+                        requested_max_ack_delay,
+                        reordering_threshold,
+                    },
             } => {
                 codec::encode_varint_len(0xaf)
                     + codec::encode_varint_len(*sequence_number)
@@ -1195,12 +1195,13 @@ impl std::fmt::Debug for Frame {
             }
 
             Frame::AckFrequency {
-                frame: AckFrequencyFrame {
-                    sequence_number,
-                    ack_eliciting_threshold,
-                    requested_max_ack_delay,
-                    reordering_threshold,
-                }
+                frame:
+                    AckFrequencyFrame {
+                        sequence_number,
+                        ack_eliciting_threshold,
+                        requested_max_ack_delay,
+                        reordering_threshold,
+                    },
             } => {
                 write!(
                     f,
@@ -1942,7 +1943,7 @@ mod tests {
         };
         assert_eq!(
             format!("{:?}", &frame),
-            "ACK_FREQUENCY seq=1 threshold=2 delay=3 ignored=0"
+            "ACK_FREQUENCY seq=1 threshold=2 delay=3 reorder=0"
         );
 
         let mut buf = [0; 128];
@@ -1951,10 +1952,7 @@ mod tests {
         assert_eq!(len, 6); // 2 (type) + 1 (seq) + 1 (threshold) + 1 (delay) + 1 (ignored)
 
         let mut buf = Bytes::copy_from_slice(&buf);
-        assert_eq!(
-            (frame, 6),
-            Frame::from_bytes(&mut buf, PacketType::OneRTT)?
-        );
+        assert_eq!((frame, 6), Frame::from_bytes(&mut buf, PacketType::OneRTT)?);
 
         // Test with larger values to check varint encoding
         let frame_large = Frame::AckFrequency {
@@ -1967,7 +1965,7 @@ mod tests {
         };
         assert_eq!(
             format!("{:?}", &frame_large),
-            "ACK_FREQUENCY seq=1234567890 threshold=9876543210 delay=1000000000000 ignored=123"
+            "ACK_FREQUENCY seq=1234567890 threshold=9876543210 delay=1000000000000 reorder=123"
         );
 
         let mut buf_large = [0; 128];
