@@ -750,7 +750,7 @@ impl Connection {
                 if frame.sequence_number <= path.recovery.peer_ack_frequency_sequence_number {
                     return Err(Error::FrameEncodingError);
                 }
-
+                
                 if frame.requested_max_ack_delay < self.peer_transport_params.min_ack_delay.unwrap()
                     || frame.requested_max_ack_delay > 2_u64.pow(14)
                 {
@@ -767,8 +767,9 @@ impl Connection {
             Frame::ImmediateAck => {
                 // An endpoint that receives an IMMEDIATE_ACK frame that it does not understand
                 // MUST treat this as a connection error of type FRAME_ENCODING_ERROR.
+                //TODO: may be not return error?
                 if !self.is_support_ack_frequency() {
-                    println!("不能收到immediate_ack帧");
+                    warn!("cant recive immediate_ack frame");
                     return Err(Error::FrameEncodingError);
                 }
 
@@ -3533,6 +3534,10 @@ impl Connection {
 
                                 // 统一的逻辑：定时器到期，当且仅当有等待ACK的包时，才触发ACK。
                                 // 这符合 RFC 9000 和 ACK Frequency 扩展的要求。
+                                warn!(
+                                    "============ack定时器触发,{}\n\n\n\n\n",
+                                    space.ack_eliciting_pkts_since_last_sent_ack
+                                );
                                 if space.ack_eliciting_pkts_since_last_sent_ack > 0 {
                                     space.need_send_ack = true;
                                 }
@@ -8947,7 +8952,6 @@ pub(crate) mod tests {
             "ACK timer should be set for delay test"
         );
         let ack_timeout = server_space.ack_timer.unwrap();
-
         // Simulate time passing, manually trigger the timeout event.
         test_pair.server.on_timeout(ack_timeout);
 

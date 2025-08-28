@@ -1216,7 +1216,6 @@ pub extern "C" fn quic_conn_immediate_ack_path(
     }
 }
 
-
 /// Add a new path on the client connection.
 #[no_mangle]
 pub extern "C" fn quic_conn_add_path(
