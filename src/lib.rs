@@ -502,6 +502,12 @@ impl Config {
         self.recovery.ack_eliciting_threshold = v;
     }
 
+    /// Set Reordering Threshold
+    /// The default value is `1`.
+    pub fn set_reordering_threshold(&mut self, v: u64) {
+        self.recovery.reordering_threshold = v;
+    }
+
     /// Set congestion control algorithm that the connection would use.
     /// The default value is Bbr.
     pub fn set_congestion_control_algorithm(&mut self, cca: CongestionControlAlgorithm) {
@@ -804,6 +810,9 @@ pub struct RecoveryConfig {
     /// sending an acknowledgment.
     ack_eliciting_threshold: u64,
 
+    /// Reordering Threshold
+    reordering_threshold: u64,
+
     /// The congestion control algorithm used for a path.
     pub congestion_control_algorithm: CongestionControlAlgorithm,
 
@@ -869,6 +878,7 @@ impl Default for RecoveryConfig {
             max_datagram_size: DEFAULT_SEND_UDP_PAYLOAD_SIZE, // The upper limit is determined by DPLPMTUD
             max_ack_delay: time::Duration::from_millis(0),
             ack_eliciting_threshold: 2,
+            reordering_threshold: 1,
             congestion_control_algorithm: CongestionControlAlgorithm::Bbr,
             min_congestion_window: 2_u64,
             initial_congestion_window: 10_u64,
