@@ -767,8 +767,8 @@ impl Config {
     }
 
     /// Set ack_min_delay to enable ACK_FREQUENCY frame and IMMEDIATE_ACK frame
-    pub fn set_ack_min_delay(&mut self, ack_min_delay: Option<u64>) {
-        self.local_transport_params.min_ack_delay = ack_min_delay;
+    pub fn set_min_ack_delay(&mut self, min_ack_delay: Option<u64>) {
+        self.local_transport_params.min_ack_delay = min_ack_delay;
     }
 
     /// Generate random address token key.

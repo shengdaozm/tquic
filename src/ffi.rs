@@ -1216,6 +1216,36 @@ pub extern "C" fn quic_conn_immediate_ack_path(
     }
 }
 
+///Set the `min_ack_delay` transmission parameter in microseconds.
+///
+/// `min_ack_delay` is a transmission parameter used to inform the peer that the peer expects it to send ACK before sending ACK
+///at least how long. Setting this parameter enables ACK_FREQUENCY and IMMEDIATE_ACK frame functionality.
+#[no_mangle]
+pub extern "C" fn quic_config_set_min_ack_delay(config:&mut Config,val:u64) {
+    config.set_min_ack_delay(Some(val));
+}
+
+/// Request the peer to update its ACK frequency
+///
+/// This function creates an ACK_FREQUENCY frame and places it in the pending queue. 
+/// The protocol stack will send the frame in a 1-RTT packet at the right time.
+#[no_mangle]
+pub extern "C" fn quic_conn_update_ack_frequency(
+    conn: &mut Connection,
+    ack_eliciting_threshold: u64,
+    requested_max_ack_delay: u64,
+    reordering_threshold: u64,
+) -> c_int {
+    match conn.update_ack_frequency(
+        ack_eliciting_threshold,
+        requested_max_ack_delay,
+        reordering_threshold,
+    ) {
+        Ok(_) => 0,
+        Err(e) => e.to_errno() as c_int,
+    }
+}
+
 /// Add a new path on the client connection.
 #[no_mangle]
 pub extern "C" fn quic_conn_add_path(
