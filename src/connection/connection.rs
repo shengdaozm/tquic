@@ -1506,7 +1506,9 @@ impl Connection {
         // All ack-eliciting 0-RTT and 1-RTT packets within its advertised
         // max_ack_delay.
         if space.ack_timer.is_none() {
-            space.ack_timer = Some(time::Instant::now() + conn_path.recovery.max_ack_delay);
+            let timeout = time::Instant::now() +conn_path.recovery.max_ack_delay;
+            space.ack_timer = Some(timeout);
+            self.timers.set(Timer::Ack,timeout);
             debug!(
                 "{} set ack timer for space {:?}, timeout {:?} ",
                 &self.trace_id, space_id, space.ack_timer
@@ -3198,12 +3200,13 @@ impl Connection {
     }
 
     /// Write ACK_FREQUENCY frames to the payload of a QUIC packet.
+    /// TODO：mulipath support
     fn try_write_ack_frequency_frames(
         &mut self,
         out: &mut [u8],
         st: &mut FrameWriteStatus,
         pkt_type: PacketType,
-        _path_id: usize,
+        _path_id: usize, // not used
     ) -> Result<()> {
         if pkt_type != PacketType::OneRTT {
             return Ok(());
@@ -3525,7 +3528,7 @@ impl Connection {
                 }
 
                 Timer::Ack => {
-                    let support_ack_frequency = self.is_support_ack_frequency();
+                    // let support_ack_frequency = self.is_support_ack_frequency();
                     for (_, space) in self.spaces.iter_mut() {
                         // 使用 if let some() 和 is_some() 来判断定时器是否存在且已超时
                         if let Some(timeout) = space.ack_timer {
@@ -3534,10 +3537,6 @@ impl Connection {
 
                                 // 统一的逻辑：定时器到期，当且仅当有等待ACK的包时，才触发ACK。
                                 // 这符合 RFC 9000 和 ACK Frequency 扩展的要求。
-                                warn!(
-                                    "============ack定时器触发,{}\n\n\n\n\n",
-                                    space.ack_eliciting_pkts_since_last_sent_ack
-                                );
                                 if space.ack_eliciting_pkts_since_last_sent_ack > 0 {
                                     space.need_send_ack = true;
                                 }
@@ -5174,7 +5173,7 @@ pub(crate) mod tests {
             conf.enable_multipath(false);
             conf.enable_dplpmtud(true);
             conf.enable_pacing(false);
-            conf.set_ack_min_delay(Some(20));
+            conf.set_min_ack_delay(Some(20));
 
             let application_protos = vec![b"h3".to_vec()];
             let tls_config = if !is_server {
