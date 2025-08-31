@@ -285,7 +285,7 @@ impl Connection {
             qlog: None,
             trace_id,
             ack_frequency_frames_to_send: VecDeque::new(),
-            next_ack_frequency_sequence_number: 0,
+            next_ack_frequency_sequence_number: 1,
         };
 
         let write_method = conn.get_write_method();
@@ -750,8 +750,7 @@ impl Connection {
                 if frame.sequence_number <= path.recovery.peer_ack_frequency_sequence_number {
                     return Err(Error::FrameEncodingError);
                 }
-                
-                if frame.requested_max_ack_delay < self.peer_transport_params.min_ack_delay.unwrap()
+                if frame.requested_max_ack_delay <= self.peer_transport_params.min_ack_delay.unwrap()
                     || frame.requested_max_ack_delay > 2_u64.pow(14)
                 {
                     return Err(Error::ProtocolViolation);
