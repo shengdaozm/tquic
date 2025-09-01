@@ -750,7 +750,8 @@ impl Connection {
                 if frame.sequence_number <= path.recovery.peer_ack_frequency_sequence_number {
                     return Err(Error::FrameEncodingError);
                 }
-                if frame.requested_max_ack_delay <= self.peer_transport_params.min_ack_delay.unwrap()
+                
+                if frame.requested_max_ack_delay < self.peer_transport_params.min_ack_delay.unwrap()
                     || frame.requested_max_ack_delay > 2_u64.pow(14)
                 {
                     return Err(Error::ProtocolViolation);
@@ -1505,9 +1506,9 @@ impl Connection {
         // All ack-eliciting 0-RTT and 1-RTT packets within its advertised
         // max_ack_delay.
         if space.ack_timer.is_none() {
-            let timeout = time::Instant::now() +conn_path.recovery.max_ack_delay;
+            let timeout = time::Instant::now() + conn_path.recovery.max_ack_delay;
             space.ack_timer = Some(timeout);
-            self.timers.set(Timer::Ack,timeout);
+            self.timers.set(Timer::Ack, timeout);
             debug!(
                 "{} set ack timer for space {:?}, timeout {:?} ",
                 &self.trace_id, space_id, space.ack_timer
@@ -3529,18 +3530,16 @@ impl Connection {
                 Timer::Ack => {
                     // let support_ack_frequency = self.is_support_ack_frequency();
                     for (_, space) in self.spaces.iter_mut() {
-                        // 使用 if let some() 和 is_some() 来判断定时器是否存在且已超时
                         if let Some(timeout) = space.ack_timer {
                             if timeout <= now {
                                 debug!("{} ack timeout for space {:?}", self.trace_id, space.id);
 
-                                // 统一的逻辑：定时器到期，当且仅当有等待ACK的包时，才触发ACK。
-                                // 这符合 RFC 9000 和 ACK Frequency 扩展的要求。
+                                // The timer expires and an ACK is triggered if and only
+                                // if there is a packet waiting for an ACK
                                 if space.ack_eliciting_pkts_since_last_sent_ack > 0 {
                                     space.need_send_ack = true;
                                 }
 
-                                // 定时器已经触发，必须清理
                                 space.ack_timer = None;
                             }
                         }
@@ -3798,7 +3797,7 @@ impl Connection {
             // It's important to do this *before* on_pkt_num_space_discarded,
             // as that function might rely on the old state before clearing it.
             // A simple way is to replace it with a new, empty space.
-            *space = space::PacketNumSpace::new(sid); // 重置整个 space
+            *space = space::PacketNumSpace::new(sid); // Reset the entire space
         }
 
         // When Initial and Handshake packet protection keys are discarded, all
@@ -6641,11 +6640,7 @@ pub(crate) mod tests {
                 let packets = TestPair::conn_packets_out(&mut test_pair.server)?;
                 TestPair::conn_packets_in(&mut test_pair.client, packets)?;
             }
-            if test_pair.client.timeout().is_some() {
-                warn!("======握手阶段======");
-                warn!("路径探测包丢失，目前定时器有");
-                warn!("Timer:{}", test_pair.client.timers);
-            }
+
             // Path MTU searching
             let data = Bytes::from_static(b"data");
             for i in 0..30 {
@@ -6658,9 +6653,6 @@ pub(crate) mod tests {
                 TestPair::conn_packets_in(&mut test_pair.client, packets)?;
 
                 if test_pair.client.timeout().is_some() {
-                    warn!("======router_mtu:{},第{}次探测======", router_mtu, i);
-                    warn!("路径探测包丢失，目前定时器有");
-                    warn!("Timer:{}", test_pair.client.timers);
                     let timeout = test_pair.client.timers.get(Timer::LossDetection);
                     test_pair.client.on_timeout(timeout.unwrap());
                 }
@@ -7336,15 +7328,15 @@ pub(crate) mod tests {
 
     #[test]
     fn test_ack_frequency_reordering_threshold() -> Result<()> {
-        // 创建支持 ACK 频率扩展的测试配置
+        // Create a test configuration that supports ACK frequency expansion
         let mut client_config = TestPair::new_test_config_with_ack_frequency(false)?;
         let mut server_config = TestPair::new_test_config_with_ack_frequency(true)?;
 
-        // 设置 ACK 触发阈值为较大值，以便主要测试重排序触发的 ACK
+        // Set the ACK trigger threshold to a large value to primarily test for ACKs triggered by reordering
         client_config.set_ack_eliciting_threshold(10);
         server_config.set_ack_eliciting_threshold(10);
 
-        // 禁用 DPLPMTUD 以避免干扰测试
+        // Disable DPLPMTUD to avoid interfering with testing
         client_config.enable_dplpmtud(false);
         server_config.enable_dplpmtud(false);
 
@@ -7352,87 +7344,84 @@ pub(crate) mod tests {
         client_config.set_max_connection_window(80);
         server_config.set_reordering_threshold(3);
 
-        // 创建测试对并完成握手
+        // Create test pairs and complete handshake
         let mut test_pair = TestPair::new(&mut client_config, &mut server_config)?;
         assert_eq!(test_pair.handshake(), Ok(()));
         test_pair.move_forward()?;
 
-        // 客户端发送 ACK_FREQUENCY 帧，设置重排序阈值为 3
+        // Client sends ACK_FREQUENCY frame, setting reorder threshold to 3
         let ack_frequency_frame = frame::Frame::AckFrequency {
             frame: frame::AckFrequencyFrame {
                 sequence_number: 1,
-                ack_eliciting_threshold: 10, // 高阈值，主要依赖重排序触发 ACK
+                ack_eliciting_threshold: 10,
                 requested_max_ack_delay: 100_00,
-                reordering_threshold: 3, // 重排序阈值为 3
+                reordering_threshold: 3, // reorder threshold is 3
             },
         };
 
         test_pair.build_packet_and_send(
             PacketType::OneRTT,
             &[ack_frequency_frame],
-            false, // 从客户端发送
+            false, // client send the packet
         )?;
 
         test_pair.move_forward()?;
 
-        // 模拟表 1 中的包接收序列: 0, 1, 3, 4, 5, 8, 9, 10
-        // 注意: 在实际实现中，我们需要更精细地控制包序号
-        // 这里简化处理，使用不同的流和数据来模拟不同序号的数据包
+        // Simulate packet reception sequence from Table 1: 0, 1, 3, 4, 5, 8, 9, 10
+        // Note: In actual implementation, we need finer control over packet numbers
+        // Here we simplify the processing by using different streams/data to simulate packets with different numbers
 
         let send_dataid = vec![
-            1,  // 包 1
-            3,  // 包 3 (跳过 2)
-            4,  // 包 4
-            5,  // 包 5 - 应该触发 ACK (5-2>=3)
-            8,  // 包 8
-            9,  // 包 9 - 应该触发 ACK (9-6>=3)
-            10, // 包 10 - 应该触发 ACK (10-7>=3)
+            1,  // packet 1
+            3,  // packet 3 (skip 2)
+            4,  // packet 4
+            5,  // packet 5 - should trigger ACK (5-2>=3)
+            8,  // packet 8
+            9,  // packet 9 - should trigger ACK (9-6>=3)
+            10, // packet 10 - should trigger ACK (10-7>=3)
         ];
 
         // let mut ack_count_before = test_pair.server.paths.get_active_mut()?.stats().acked_count;
-        let expected_ack_points = vec![5, 9, 10]; // 预期在这些包后会有 ACK
+        let expected_ack_points = vec![5, 9, 10]; // ACK is expected after these packets
 
         let sid = test_pair.client.stream_bidi_new(0, false)?;
 
         for i in 1..=10 {
-            // 客户端写入数据
+            // client writes data
             let data = Bytes::from_static(b"QUIC");
 
             test_pair.client.stream_write(sid, data, false)?;
 
-            // 客户端发送包
+            // client sends packet
             let packets = TestPair::conn_packets_out(&mut test_pair.client)?;
 
             if !send_dataid.contains(&i) {
                 continue;
             }
 
-            info!("sent ........ {i}");
-            // 服务器接收包
+            // server receives packet
             TestPair::conn_packets_in(&mut test_pair.server, packets)?;
 
-            // 检查是否在预期点触发了 ACK
+            // check if ACK is triggered at the expected point
             let server_packets = TestPair::conn_packets_out(&mut test_pair.server)?;
 
             if expected_ack_points.contains(&i) {
-                // 预期有 ACK
+                // Expect ACK
                 assert!(
                     !server_packets.is_empty(),
                     "Expected ACK after packet {}",
                     i
                 );
 
-                info!("client in ack .... {i}");
-                // 客户端接收 ACK
+                // client receives ACK
                 TestPair::conn_packets_in(&mut test_pair.client, server_packets)?;
 
-                // 确认 ACK 计数增加
+                // confirm ACK count increases
                 let new_ack_count = test_pair.server.paths.get_active_mut()?.stats().acked_count;
                 // assert_eq!(ack_count_before + 1, new_ack_count);
                 // ack_count_before = new_ack_count;
-                info!("........ -> {new_ack_count}");
             } else {
-                // 预期没有 ACK
+                // No ACK expected
                 assert!(
                     server_packets.is_empty(),
                     "Unexpected ACK after packet {}",
@@ -7446,98 +7435,90 @@ pub(crate) mod tests {
 
     #[test]
     fn test_ack_frequency_reordering_threshold_5() -> Result<()> {
-        // 创建支持 ACK 频率扩展的测试配置
+        // Create test configuration that supports ACK frequency extension
         let mut client_config = TestPair::new_test_config_with_ack_frequency(false)?;
         let mut server_config = TestPair::new_test_config_with_ack_frequency(true)?;
 
-        // 设置 ACK 触发阈值为较大值，以便主要测试重排序触发的 ACK
+        // Set the ACK trigger threshold to a large value to mainly test ACKs triggered by reordering
         client_config.set_ack_eliciting_threshold(10);
         server_config.set_ack_eliciting_threshold(10);
 
-        // 禁用 DPLPMTUD 以避免干扰测试
+        // Disable DPLPMTUD to avoid interfering with testing
         client_config.enable_dplpmtud(false);
         server_config.enable_dplpmtud(false);
 
         server_config.set_reordering_threshold(5);
 
-        // 创建测试对并完成握手
+        // Create test pairs and complete handshake
         let mut test_pair = TestPair::new(&mut client_config, &mut server_config)?;
         assert_eq!(test_pair.handshake(), Ok(()));
         test_pair.move_forward()?;
 
-        // 客户端发送 ACK_FREQUENCY 帧，设置重排序阈值为 5
+        // Client sends ACK_FREQUENCY frame, setting reordering threshold to 5
         let ack_frequency_frame = frame::Frame::AckFrequency {
             frame: frame::AckFrequencyFrame {
                 sequence_number: 1,
-                ack_eliciting_threshold: 10, // 高阈值，主要依赖重排序触发 ACK
+                ack_eliciting_threshold: 10, // High threshold, mainly relies on reordering to trigger ACK
                 requested_max_ack_delay: 100_00, // 100ms
-                reordering_threshold: 5,     // 重排序阈值为 5
+                reordering_threshold: 5,     // reordering threshold is 5
             },
         };
 
         test_pair.build_packet_and_send(
             PacketType::OneRTT,
             &[ack_frequency_frame],
-            false, // 从客户端发送
+            false, // send from client
         )?;
 
         test_pair.move_forward()?;
 
-        // 模拟表 2 中的包接收序列: 0, 1, 3, 5, 6, 7, 8, 9
+        // Simulate the packet reception sequence in Table 2: 0, 1, 3, 5, 6, 7, 8, 9
         let streams_dataid = vec![
-            0, // 包 0
-            1, // 包 1
-            3, // 包 3 (跳过 2)
-            5, // 包 5 (跳过 4)
-            6, // 包 6
-            7, // 包 7 - 应该触发 ACK (7-2>=5)
-            8, // 包 8
-            9, // 包 9 - 应该触发 ACK (9-4>=5)
+            0, // packet 0
+            1, // packet 1
+            3, // packet 3 (skip 2)
+            5, // packet 5 (skip 4)
+            6, // packet 6
+            7, // packet 7 - should trigger ACK (7-2>=5)
+            8, // packet 8
+            9, // packet 9 - should trigger ACK (9-4>=5)
         ];
 
         // let mut ack_count_before = test_pair.server.paths.get_active_mut()?.stats().acked_count;
 
-        let expected_ack_points = vec![7, 9]; // 预期在这些包后会有 ACK (索引从0开始)
+        let expected_ack_points = vec![7, 9]; // ACK is expected after these packets (index starts from 0)
 
         let sid = test_pair.client.stream_bidi_new(0, false)?;
 
         for i in 0..9 {
-            // 客户端写入数据
             let data = Bytes::from_static(b"QUIC");
 
             test_pair.client.stream_write(sid, data, false)?;
-
-            // 客户端发送包
             let packets = TestPair::conn_packets_out(&mut test_pair.client)?;
 
-            // 模拟丢包
             if !streams_dataid.contains(&i) {
                 continue;
             }
 
-            // 服务器接收包
             TestPair::conn_packets_in(&mut test_pair.server, packets)?;
-
-            // 检查是否在预期点触发了 ACK
             let server_packets = TestPair::conn_packets_out(&mut test_pair.server)?;
 
             if expected_ack_points.contains(&i) {
-                // 预期有 ACK
                 assert!(
                     !server_packets.is_empty(),
                     "Expected ACK after packet {}",
                     i
                 );
 
-                // 客户端接收 ACK
+                // client receives ACK
                 TestPair::conn_packets_in(&mut test_pair.client, server_packets)?;
 
-                // 确认 ACK 计数增加
+                // confirm ACK count increases
                 // let new_ack_count = test_pair.server.paths.get_active_mut()?.stats().acked_count;
                 // assert_eq!(ack_count_before + 1, new_ack_count);
                 // ack_count_before = new_ack_count;
             } else {
-                // 预期没有 ACK
+                // No ACK expected
                 assert!(
                     server_packets.is_empty(),
                     "Unexpected ACK after packet {}",
@@ -7606,12 +7587,9 @@ pub(crate) mod tests {
         let sid = test_pair.client.stream_bidi_new(0, false)?;
 
         for i in 1..=10 {
-            // client write data
             let data = Bytes::from_static(b"QUIC");
 
             test_pair.client.stream_write(sid, data, false)?;
-
-            // client send data
             let packets = TestPair::conn_packets_out(&mut test_pair.client)?;
 
             if !send_dataid.contains(&i) {
