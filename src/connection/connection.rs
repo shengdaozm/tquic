@@ -8958,6 +8958,70 @@ pub(crate) mod tests {
         assert_eq!(server_space.ack_eliciting_pkts_since_last_sent_ack, 0);
         Ok(())
     }
+
+    #[test]
+    fn test_ack_frequency_sequence_number_validation() -> Result<()> {
+        // Test that ACK_FREQUENCY sequence number starts from 1 (not 0)
+        // This validates line 288: next_ack_frequency_sequence_number is initialized to 1
+        let mut test_pair = TestPair::new_with_test_config_with_ack_frequency()?;
+        assert_eq!(test_pair.handshake(), Ok(()));
+
+        // Verify initial sequence number is 1
+        assert_eq!(test_pair.client.next_ack_frequency_sequence_number, 1);
+        assert_eq!(test_pair.server.next_ack_frequency_sequence_number, 1);
+
+        // Send first ACK_FREQUENCY frame
+        test_pair.client.update_ack_frequency(2, 25000, 3)?;
+
+        // Verify sequence number increments to 2
+        assert_eq!(test_pair.client.next_ack_frequency_sequence_number, 2);
+
+        // Send second ACK_FREQUENCY frame
+        test_pair.client.update_ack_frequency(3, 30000, 3)?;
+
+        // Verify sequence number increments to 3
+        assert_eq!(test_pair.client.next_ack_frequency_sequence_number, 3);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_ack_frequency_max_ack_delay_validation() -> Result<()> {
+        // Test that max_ack_delay can be equal to min_ack_delay
+        // This validates lines 754-758: requested_max_ack_delay validation logic
+
+        // Create configs with ACK frequency extension enabled
+        let mut client_config = TestPair::new_test_config_with_ack_frequency(false)?;
+        let mut server_config = TestPair::new_test_config_with_ack_frequency(true)?;
+        let mut test_pair = TestPair::new(&mut client_config, &mut server_config)?;
+        assert_eq!(test_pair.handshake(), Ok(()));
+
+        // Test case 1: requested_max_ack_delay equals min_ack_delay (should be valid)
+        let min_ack_delay = 20; // Default min_ack_delay from test config
+        let result = test_pair.client.update_ack_frequency(2, min_ack_delay, 3);
+        assert!(result.is_ok(), "max_ack_delay equal to min_ack_delay should be valid");
+
+        // Test case 2: requested_max_ack_delay greater than min_ack_delay (should be valid)
+        let result = test_pair.client.update_ack_frequency(2, min_ack_delay + 5000, 3);
+        assert!(result.is_ok(), "max_ack_delay greater than min_ack_delay should be valid");
+
+        // Test case 3: requested_max_ack_delay less than min_ack_delay (should be invalid)
+        // Note: min_ack_delay is set to 20 in the test config, so we test with a value less than 20
+        // The client can create the frame, but the server should reject it when processing
+        let result = test_pair.client.update_ack_frequency(3, min_ack_delay - 5, 3);
+        assert!(result.is_ok(), "Client should be able to create ACK_FREQUENCY frame");
+
+        // Move packets from client to server to trigger validation
+        // This should result in a ProtocolViolation error because requested_max_ack_delay < min_ack_delay
+        let move_result = test_pair.move_forward();
+        assert!(move_result.is_err(), "Server should reject invalid ACK_FREQUENCY frame");
+
+        // Verify that the error is indeed a ProtocolViolation
+        if let Err(e) = move_result {
+            assert_eq!(e, crate::Error::ProtocolViolation, "Should be ProtocolViolation error");
+        }
+        Ok(())
+    }
 }
 
 mod cid;
