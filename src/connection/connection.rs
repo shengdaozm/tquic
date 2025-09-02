@@ -746,12 +746,18 @@ impl Connection {
                 // An endpoint MUST treat receipt of an ACK_FREQUENCY frame with a
                 // sequence number less than or equal to any previously received ACK_FREQUENCY
                 // frame as a connection error of type FRAME_ENCODING.
+                if !self.is_support_ack_frequency() {
+                    warn!("can't recive ack_frequency frame without ack_frequency extension");
+                    return Err(Error::FrameEncodingError);
+                }
+
                 let path = self.paths.get_mut(path_id)?;
                 if frame.sequence_number <= path.recovery.peer_ack_frequency_sequence_number {
                     return Err(Error::FrameEncodingError);
                 }
-                
-                if frame.requested_max_ack_delay < self.peer_transport_params.min_ack_delay.unwrap()
+
+                if frame.requested_max_ack_delay
+                    < self.local_transport_params.min_ack_delay.unwrap()
                     || frame.requested_max_ack_delay > 2_u64.pow(14)
                 {
                     return Err(Error::ProtocolViolation);
@@ -769,7 +775,7 @@ impl Connection {
                 // MUST treat this as a connection error of type FRAME_ENCODING_ERROR.
                 //TODO: may be not return error?
                 if !self.is_support_ack_frequency() {
-                    warn!("cant recive immediate_ack frame");
+                    warn!("can't recive immediate_ack frame without ack_frequency extension");
                     return Err(Error::FrameEncodingError);
                 }
 
@@ -2226,7 +2232,7 @@ impl Connection {
         }
 
         // Per draft-ietf-quic-ack-frequency-11, Section 8.3, bundle IMMEDIATE_ACK with PMTU probes.
-        if self.is_support_ack_frequency() {
+        if self.is_support_ack_frequency_peer() {
             let frame = frame::Frame::ImmediateAck;
             Connection::write_frame_to_packet(frame, buf, st)?;
             st.ack_eliciting = true;
@@ -2776,13 +2782,13 @@ impl Connection {
         path_id: usize,
     ) -> Result<()> {
         // As per the draft, IMMEDIATE_ACK frames cannot be sent in 0-RTT packets.
-        if pkt_type == PacketType::ZeroRTT || self.is_closing() {
+        if pkt_type != PacketType::OneRTT || !self.is_established() || self.is_closing() {
             return Ok(());
         }
 
-        let is_support_ack_frequency = self.is_support_ack_frequency();
+        let is_support_ack_frequency_peer = self.is_support_ack_frequency_peer();
         let path = self.paths.get_mut(path_id)?;
-        if !path.need_send_immediate_ack || !is_support_ack_frequency {
+        if !path.need_send_immediate_ack || !is_support_ack_frequency_peer {
             return Ok(());
         }
 
@@ -2893,9 +2899,9 @@ impl Connection {
         requested_max_ack_delay: u64,
         reordering_threshold: u64,
     ) -> Result<()> {
-        if !self.is_established() || !self.is_support_ack_frequency() {
+        if !self.is_established() || !self.is_support_ack_frequency_peer() {
             return Err(Error::InvalidOperation(
-                "ACK Frequency extension not supported or handshake not completed".into(),
+                "peer ACK Frequency extension not supported or handshake not completed".into(),
             ));
         }
 
@@ -3528,7 +3534,6 @@ impl Connection {
                 }
 
                 Timer::Ack => {
-                    // let support_ack_frequency = self.is_support_ack_frequency();
                     for (_, space) in self.spaces.iter_mut() {
                         if let Some(timeout) = space.ack_timer {
                             if timeout <= now {
@@ -3713,11 +3718,15 @@ impl Connection {
         self.flags.contains(GotReset)
     }
 
-    /// Check whether support the ack frequency
-    pub fn is_support_ack_frequency(&self) -> bool {
+    /// Check peer whether support the ack frequency extension
+    pub fn is_support_ack_frequency_peer(&self) -> bool {
         self.peer_transport_params.min_ack_delay.is_some()
     }
 
+    /// check local whether support the ack frequency extension
+    pub fn is_support_ack_frequency(&self) -> bool {
+        self.local_transport_params.min_ack_delay.is_some()
+    }
     /// Close the connection.
     pub fn close(&mut self, app: bool, err: u64, reason: &[u8]) -> Result<()> {
         if self.is_closed() || self.is_draining() {
@@ -3976,6 +3985,13 @@ impl Connection {
     /// If `path_addr` is `None`, an IMMEDIATE_ACK frame will be sent on each active path.
     /// Otherwise, an IMMEDIATE_ACK frame will be sent on the specified path.
     pub fn immediate_ack(&mut self, path_addr: Option<FourTuple>) -> Result<()> {
+        // IMMEDIATE_ACK frames cannot be sent during the handshake phase
+        // according to QUIC ACK Frequency extension specification
+        if !self.is_established() {
+            return Err(Error::InvalidOperation(
+                "IMMEDIATE_ACK frame cannot be sent during handshake".into(),
+            ));
+        }
         // if ack_freqency is not supported, do nothing.
         if !self.is_support_ack_frequency() {
             return Ok(());
@@ -8802,7 +8818,95 @@ pub(crate) mod tests {
                 .initiate_key_update(space, false),
             Err(Error::Done)
         );
+        Ok(())
+    }
 
+    #[test]
+    fn test_ack_frequency_when_extension_disabled() -> Result<()> {
+        // Test case 1: Client supports, server doesn't support ACK frequency extension
+        // Client can't send ACK_FREQUENCY frames, but server can send them
+        {
+            let mut client_config = TestPair::new_test_config_with_ack_frequency(false)?;
+            let mut server_config = TestPair::new_test_config(true)?;
+
+            client_config.set_ack_eliciting_threshold(10);
+            server_config.set_ack_eliciting_threshold(10);
+
+            let mut test_pair = TestPair::new(&mut client_config, &mut server_config)?;
+            assert_eq!(test_pair.handshake(), Ok(()));
+            test_pair.move_forward()?;
+
+            assert!(test_pair.client.is_support_ack_frequency());
+            assert!(!test_pair.server.is_support_ack_frequency());
+            assert!(test_pair.server.is_support_ack_frequency_peer());
+            assert!(!test_pair.client.is_support_ack_frequency_peer());
+
+            let server_result = test_pair.server.update_ack_frequency(5, 10_000, 2);
+            assert!(server_result.is_ok());
+            let client_result = test_pair.client.update_ack_frequency(1, 2, 1000);
+            assert!(client_result.is_err());
+
+            let sid = test_pair.server.stream_bidi_new(0, false)?;
+            test_pair
+                .server
+                .stream_write(sid, Bytes::from_static(b"trigger packet"), false)?;
+            let packets = TestPair::conn_packets_out(&mut test_pair.server)?;
+            assert!(
+                !packets.is_empty(),
+                "Server should send a packet containing ACK_FREQUENCY frame"
+            );
+
+            TestPair::conn_packets_in(&mut test_pair.client, packets)?;
+            let client_active_path_id = test_pair.client.paths.get_active_path_id()?;
+            let client_path = test_pair.client.paths.get_mut(client_active_path_id)?;
+            assert_eq!(
+                client_path.recovery.max_ack_delay,
+                std::time::Duration::from_micros(10_000),
+                "Client's max_ack_delay should be updated to the value from the frame."
+            );
+        }
+
+        // Test case 2: Server supports, client doesn't support ACK frequency extension
+        // Server can't ACK_FREQUENCY frames, client can send them
+        {
+            let mut client_config = TestPair::new_test_config(false)?;
+            let mut server_config = TestPair::new_test_config_with_ack_frequency(true)?;
+
+            client_config.set_ack_eliciting_threshold(10);
+            server_config.set_ack_eliciting_threshold(10);
+
+            let mut test_pair = TestPair::new(&mut client_config, &mut server_config)?;
+            assert_eq!(test_pair.handshake(), Ok(()));
+            test_pair.move_forward()?;
+
+            assert!(!test_pair.client.is_support_ack_frequency());
+            assert!(test_pair.server.is_support_ack_frequency());
+            assert!(!test_pair.server.is_support_ack_frequency_peer());
+            assert!(test_pair.client.is_support_ack_frequency_peer());
+
+            let client_result = test_pair.client.update_ack_frequency(1, 2_000, 1000);
+            assert!(client_result.is_ok());
+            let server_result = test_pair.server.update_ack_frequency(1, 2_000, 1000);
+            assert!(server_result.is_err());
+
+            let sid = test_pair.client.stream_bidi_new(0, false)?;
+            test_pair
+                .client
+                .stream_write(sid, Bytes::from_static(b"trigger packet"), false)?;
+            let packets = TestPair::conn_packets_out(&mut test_pair.client)?;
+            assert!(
+                !packets.is_empty(),
+                "client should send a packet containing ACK_FREQUENCY frame"
+            );
+            TestPair::conn_packets_in(&mut test_pair.server, packets)?;
+            let client_active_path_id = test_pair.server.paths.get_active_path_id()?;
+            let server_path = test_pair.server.paths.get_mut(client_active_path_id)?;
+            assert_eq!(
+                server_path.recovery.peer_ack_eliciting_threshold,
+                1,
+                "Client's peer_ack_eliciting_threshold should be updated to the value from the frame."
+            );
+        }
         Ok(())
     }
 
